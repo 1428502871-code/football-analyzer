@@ -80,7 +80,6 @@ def update_result(record_id, actual_result):
 
 
 def auto_update_results():
-    """自动查询已分析但未回填的比赛，更新赛果。只查最近30天。"""
     engine = get_db_engine()
     if not engine:
         return 0
@@ -581,16 +580,6 @@ def analyze_match(home_name, away_name, date_hint=None):
 
 
 # ================================================================
-# ============ 应用启动时自动回填赛果 ============
-# ================================================================
-if "auto_updated_once" not in st.session_state:
-    st.session_state["auto_updated_once"] = True
-    _n = auto_update_results()
-    if _n > 0:
-        st.toast(f"✅ 已自动回填 {_n} 场比赛赛果", icon="🎯")
-
-
-# ================================================================
 # ============ 界面 ============
 # ================================================================
 tab1, tab2, tab3 = st.tabs(["📊 分析", "⚙️ 调参", "📚 历史记录"])
@@ -850,7 +839,17 @@ with tab2:
 
 with tab3:
     st.subheader("📚 历史分析记录")
-    st.caption("每次分析自动存库。赛果自动回填，不需要手动操作。")
+
+    # 首次进入此标签页时，自动回填赛果（放在这里避免启动期调用）
+    if "auto_checked_tab3" not in st.session_state:
+        st.session_state["auto_checked_tab3"] = True
+        try:
+            with st.spinner("正在检查赛果..."):
+                _n = auto_update_results()
+            if _n > 0:
+                st.success(f"✅ 已自动回填 {_n} 场比赛赛果")
+        except Exception:
+            pass
 
     col_a, col_b = st.columns([1, 4])
     with col_a:
@@ -867,7 +866,6 @@ with tab3:
         st.info("暂无历史记录，或数据库未配置")
     else:
         st.success(f"共 {len(history)} 条记录")
-        # 统计
         finished = [h for h in history if h.get("actual_result")]
         if finished:
             hits = 0
@@ -899,7 +897,7 @@ with tab3:
                 if h.get("actual_result"):
                     st.success(f"✅ 赛果：{h['actual_result']}")
                 else:
-                    st.info("⏳ 赛果待更新（比赛未结束或数据未同步）")
+                    st.info("⏳ 赛果待更新")
                     with st.expander("手动回填（可选）"):
                         col_x, col_y = st.columns([3, 1])
                         with col_x:
