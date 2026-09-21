@@ -37,6 +37,15 @@ LEAGUE_CODE_MAP = {
 }
 TRAINING_SEASONS = ["2223", "2324", "2425"]
 
+# 各联赛累积黄牌停赛阈值
+YELLOW_THRESHOLD = {
+    "英超": 5, "英冠": 5, "西甲": 5, "西乙": 5,
+    "德甲": 5, "德乙": 5, "意甲": 5, "意乙": 5,
+    "法甲": 3, "法乙": 3, "荷甲": 5, "葡超": 5,
+    "比甲": 5, "苏超": 6, "挪超": 4, "瑞超": 3,
+    "丹超": 4, "芬超": 4,
+}
+
 
 def get_db_engine():
     if not db_url or not db_url.startswith("postgresql"):
@@ -211,7 +220,7 @@ def download_league_csv(league_cn, seasons=TRAINING_SEASONS):
 
 
 def preprocess_df(df):
-    """提取特征：赔率去水 + 赔率漂移（容错版，处理 '#' 等非法字符）"""
+    """提取特征：赔率去水 + 赔率漂移（容错版）"""
     needed = ['B365H', 'B365D', 'B365A', 'FTHG', 'FTAG']
     for c in needed:
         if c not in df.columns:
@@ -592,21 +601,8 @@ def get_injuries(fixture_id):
 
 
 @st.cache_data(ttl=86400)
-def get_sidelined(player_id):
-    try:
-        r = requests.get(f"{BASE_URL}/sidelined", headers=HEADERS,
-                         params={"players": player_id}, timeout=10)
-        data = r.json()
-        if data.get("response"):
-            rec = data["response"][0]
-            return rec.get("start", "未知") or "未知", rec.get("end", "未知") or "未知"
-    except Exception:
-        pass
-    return "未知", "未知"
-
-
-@st.cache_data(ttl=86400)
 def get_player_stats(player_id):
+    """获取球员赛季统计：位置、出场、黄牌、红牌"""
     try:
         r = requests.get(f"{BASE_URL}/players", headers=HEADERS,
                          params={"id": player_id, "season": current_season()}, timeout=10)
@@ -616,12 +612,19 @@ def get_player_stats(player_id):
             if sl:
                 best = max(sl, key=lambda s: s["games"].get("minutes") or 0)
                 g = best.get("games", {})
-                return {"position": g.get("position", "") or "",
-                        "minutes": g.get("minutes") or 0,
-                        "appearences": g.get("appearences") or 0}
+                cards = best.get("cards", {}) or {}
+                return {
+                    "position": g.get("position", "") or "",
+                    "minutes": g.get("minutes") or 0,
+                    "appearences": g.get("appearences") or 0,
+                    "yellow": cards.get("yellow") or 0,
+                    "yellowred": cards.get("yellowred") or 0,
+                    "red": cards.get("red") or 0,
+                }
     except Exception:
         pass
-    return {"position": "", "minutes": 0, "appearences": 0}
+    return {"position": "", "minutes": 0, "appearences": 0,
+            "yellow": 0, "yellowred": 0, "red": 0}
 
 
 def classify_role(minutes, appearances):
@@ -855,22 +858,44 @@ def analyze_match(home_name, away_name, date_hint=None):
     hcn = en_to_cn(hs)
     acn = en_to_cn(as_)
 
+    # 停赛阈值（按联赛）
+    _, _, league_cn_tmp, _ = get_league_info(lid, lname)
+    y_threshold = YELLOW_THRESHOLD.get(league_cn_tmp, 5)
+
     inj_list = []
     for inj in injuries:
         t_id = inj["team"]["id"]
         team_cn = hcn if t_id == hid else (acn if t_id == aid else "未知")
         pid = inj["player"].get("id")
-        stats = get_player_stats(pid) if pid else {"position": "", "minutes": 0, "appearences": 0}
+        stats = get_player_stats(pid) if pid else {"position": "", "minutes": 0, "appearences": 0,
+                                                   "yellow": 0, "yellowred": 0, "red": 0}
         raw_pos = inj["player"].get("position", "") or stats["position"]
-        sd, ed = get_sidelined(pid) if pid else ("未知", "未知")
+        reason_cn = translate_injury_reason(inj["player"].get("reason", inj.get("type", "")))
+
+        y = stats.get("yellow", 0)
+        yr = stats.get("yellowred", 0)
+        rr = stats.get("red", 0)
+        reason_lower = (inj["player"].get("reason") or inj.get("type") or "").lower()
+
+        # 判断停赛状态
+        if "red" in reason_lower or rr > 0:
+            status = "🔴 红牌停赛"
+        elif "yellow" in reason_lower or "suspended" in reason_lower:
+            status = "🟨 累积黄牌停赛"
+        elif y >= y_threshold - 1:
+            status = f"⚠️ 临近停赛 ({y}/{y_threshold}黄)"
+        else:
+            status = "伤病"
+
         inj_list.append({
             "球队": team_cn,
             "球员": translate_player(inj["player"].get("name", "")),
             "位置": translate_position(raw_pos),
             "角色": classify_role(stats["minutes"], stats["appearences"]),
-            "原因": translate_injury_reason(inj["player"].get("reason", inj.get("type", ""))),
-            "起始日期": sd,
-            "预计复出": ed,
+            "原因": reason_cn,
+            "状态": status,
+            "赛季黄牌": y,
+            "赛季红牌": rr + yr,
         })
 
     h2h_list = [{"日期": m["fixture"]["date"][:10],
