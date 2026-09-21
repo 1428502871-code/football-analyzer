@@ -12,7 +12,6 @@ api_key = os.environ.get("API_FOOTBALL_KEY", "")
 HEADERS = {"x-apisports-key": api_key}
 BASE_URL = "https://v3.football.api-sports.io"
 
-# ============ 默认参数 ============
 WEIGHTS = {"injury": 0.20, "home_away": 0.20, "h2h": 0.18, "form": 0.21, "motivation": 0.21}
 
 # ============ 联赛ID → 融合比例映射 ============
@@ -45,8 +44,9 @@ def get_league_info(league_id, league_name_from_api=""):
         return model_w, market_w, cn_name, cat
     return 0.55, 0.45, league_name_from_api or "未知联赛", "普通"
 
-# ============ 中文队名 → 英文队名 映射表 ============
+# ============ 中文队名 ↔ 英文队名 双向映射 ============
 CN_TEAM_MAP = {
+    # 英超
     "阿森纳": "Arsenal", "切尔西": "Chelsea", "曼城": "Man City", "曼彻斯特城": "Man City",
     "曼联": "Man United", "曼彻斯特联": "Man United", "利物浦": "Liverpool",
     "热刺": "Tottenham", "托特纳姆": "Tottenham", "纽卡斯尔": "Newcastle",
@@ -55,6 +55,7 @@ CN_TEAM_MAP = {
     "水晶宫": "Crystal Palace", "布伦特福德": "Brentford", "狼队": "Wolves",
     "诺丁汉森林": "Nottingham Forest", "伯恩茅斯": "Bournemouth",
     "莱斯特城": "Leicester", "南安普顿": "Southampton", "伊普斯维奇": "Ipswich",
+    # 西甲
     "皇马": "Real Madrid", "皇家马德里": "Real Madrid", "巴萨": "Barcelona",
     "巴塞罗那": "Barcelona", "马竞": "Atletico Madrid", "马德里竞技": "Atletico Madrid",
     "塞维利亚": "Sevilla", "毕尔巴鄂": "Athletic Bilbao", "皇家社会": "Real Sociedad",
@@ -62,6 +63,7 @@ CN_TEAM_MAP = {
     "瓦伦西亚": "Valencia", "赫罗纳": "Girona", "塞尔塔": "Celta Vigo",
     "拉科鲁尼亚": "Deportivo", "莱万特": "Levante", "西班牙人": "Espanyol",
     "赫塔菲": "Getafe", "巴列卡诺": "Rayo Vallecano", "奥萨苏纳": "Osasuna",
+    # 德甲
     "拜仁": "Bayern Munich", "拜仁慕尼黑": "Bayern Munich", "多特": "Dortmund",
     "多特蒙德": "Dortmund", "莱比锡": "RB Leipzig", "勒沃库森": "Bayer Leverkusen",
     "法兰克福": "Eintracht Frankfurt", "斯图加特": "Stuttgart",
@@ -69,6 +71,7 @@ CN_TEAM_MAP = {
     "弗赖堡": "Freiburg", "霍芬海姆": "Hoffenheim", "美因茨": "Mainz",
     "奥格斯堡": "Augsburg", "柏林联合": "Union Berlin", "波鸿": "Bochum",
     "海登海姆": "Heidenheim", "圣保利": "St Pauli", "荷尔斯泰因": "Holstein Kiel",
+    # 意甲
     "尤文": "Juventus", "尤文图斯": "Juventus", "国米": "Inter",
     "国际米兰": "Inter", "AC米兰": "AC Milan", "米兰": "AC Milan",
     "那不勒斯": "Napoli", "罗马": "Roma", "拉齐奥": "Lazio",
@@ -76,30 +79,62 @@ CN_TEAM_MAP = {
     "都灵": "Torino", "乌迪内斯": "Udinese", "热那亚": "Genoa",
     "卡利亚里": "Cagliari", "莱切": "Lecce", "维罗纳": "Verona",
     "萨索洛": "Sassuolo", "恩波利": "Empoli", "蒙扎": "Monza", "科莫": "Como",
+    # 法甲
     "巴黎": "PSG", "巴黎圣日耳曼": "PSG", "马赛": "Marseille", "里昂": "Lyon",
     "摩纳哥": "Monaco", "尼斯": "Nice", "里尔": "Lille", "朗斯": "Lens",
     "雷恩": "Rennes", "斯特拉斯堡": "Strasbourg", "图卢兹": "Toulouse",
     "南特": "Nantes", "兰斯": "Reims", "布雷斯特": "Brest",
     "蒙彼利埃": "Montpellier", "勒阿弗尔": "Le Havre", "欧塞尔": "Auxerre",
     "昂热": "Angers", "圣埃蒂安": "Saint-Etienne",
+    # 荷甲/葡超/比甲/苏超
     "阿贾克斯": "Ajax", "埃因霍温": "PSV", "费耶诺德": "Feyenoord",
     "波尔图": "Porto", "本菲卡": "Benfica", "里斯本竞技": "Sporting CP",
     "凯尔特人": "Celtic", "流浪者": "Rangers",
+    # 北欧
     "罗森博格": "Rosenborg", "莫尔德": "Molde", "博多闪耀": "Bodo Glimt",
     "马尔默": "Malmo", "哥本哈根": "Copenhagen", "北西兰": "Nordsjaelland",
+    # 欧战常见
     "加拉塔萨雷": "Galatasaray", "费内巴切": "Fenerbahce",
     "顿涅茨克矿工": "Shakhtar", "萨尔茨堡": "Salzburg",
     "布鲁日": "Club Brugge", "年轻人": "Young Boys",
 }
 
+# 构建反向映射（英文 → 中文），保留第一个中文名
+EN_TO_CN = {}
+for cn, en in CN_TEAM_MAP.items():
+    if en not in EN_TO_CN:
+        EN_TO_CN[en] = cn
+
 def cn_to_en(name):
+    """中文转英文"""
     name = name.strip()
     return CN_TEAM_MAP.get(name, name)
+
+def en_to_cn(en_name):
+    """英文转中文，支持精确、忽略大小写、模糊包含三种匹配"""
+    if not en_name:
+        return en_name
+    en_name = en_name.strip()
+    # 1. 精确匹配
+    if en_name in EN_TO_CN:
+        return EN_TO_CN[en_name]
+    # 2. 忽略大小写
+    en_lower = en_name.lower()
+    for en, cn in EN_TO_CN.items():
+        if en.lower() == en_lower:
+            return cn
+    # 3. 模糊包含（队名里含有关键词）
+    for en, cn in EN_TO_CN.items():
+        en_l = en.lower()
+        if en_l in en_lower or en_lower in en_l:
+            return cn
+    # 4. 都匹配不到，返回英文原名
+    return en_name
 
 # ============ API 调用函数 ============
 @st.cache_data(ttl=600)
 def search_fixtures_by_date(date_str):
-    """搜索指定日期的比赛，只保留支持的联赛"""
+    """搜索指定日期的比赛，只保留支持的联赛，队名转中文"""
     try:
         r = requests.get(f"{BASE_URL}/fixtures", headers=HEADERS,
                          params={"date": date_str, "timezone": "Asia/Shanghai"}, timeout=15)
@@ -254,7 +289,7 @@ def calc_all_probs(odds, coefs, league_id, league_name=""):
         "league_cn": cn_name, "model_w": model_w, "market_w": market_w
     }
 
-# ============ 分析单场比赛（复用函数） ============
+# ============ 分析单场比赛 ============
 def analyze_match(home_name, away_name):
     home_id, home_std = search_team(home_name)
     away_id, away_std = search_team(away_name)
@@ -291,15 +326,19 @@ def analyze_match(home_name, away_name):
     
     probs = calc_all_probs([h_odd, d_odd, a_odd], coefs, league_id, league_name_api)
     
+    # 显示用中文队名
+    home_cn = en_to_cn(home_std)
+    away_cn = en_to_cn(away_std)
+    
     return {
-        "match": f"{home_std} vs {away_std}",
+        "match": f"{home_cn} vs {away_cn}",
         "league_api": league_name_api, "league_country": league_country,
         "league_id": league_id, "league_cn": probs["league_cn"],
         "odds": (h_odd, d_odd, a_odd), "coefs": coefs, "probs": probs,
     }, None
 
 # ================================================================
-# ============ 界面：按日期搜索模块（新增） ============
+# ============ 界面：按日期搜索 ============
 # ================================================================
 st.subheader("📅 按日期搜索当日比赛")
 st.caption("搜索指定日期、系统支持的所有联赛比赛，勾选后加入分析列表。")
@@ -323,20 +362,23 @@ if "date_fixtures" in st.session_state:
     else:
         st.success(f"共找到 {len(fixtures)} 场支持的联赛比赛（{st.session_state.get('date_fixtures_date', '')}）")
         
-        # 构建选项
         options = []
         opt_to_match = {}
         for f in fixtures:
-            home = f["teams"]["home"]["name"]
-            away = f["teams"]["away"]["name"]
+            home_en = f["teams"]["home"]["name"]
+            away_en = f["teams"]["away"]["name"]
+            # 转中文
+            home_cn = en_to_cn(home_en)
+            away_cn = en_to_cn(away_en)
             lid = f["league"]["id"]
             league_cn = LEAGUE_MAP[lid][2]
             time_str = f["fixture"]["date"][11:16]
-            opt = f"[{league_cn}] {home} vs {away} ({time_str})"
+            opt = f"[{league_cn}] {home_cn} vs {away_cn} ({time_str})"
             options.append(opt)
-            opt_to_match[opt] = f"{home} {away}"
+            # 存中文队名，便于后续解析
+            opt_to_match[opt] = f"{home_cn} {away_cn}"
         
-        selected = st.multiselect("勾选要分析的比赛（可多选，含中英文队名均可）", options)
+        selected = st.multiselect("勾选要分析的比赛（可多选）", options)
         
         col_c, col_d = st.columns(2)
         with col_c:
@@ -378,7 +420,6 @@ if st.button("🚀 开始批量分析", type="primary"):
         all_matches.extend([m.strip() for m in match_input.split(",") if m.strip()])
     if st.session_state.get("selected_matches"):
         all_matches.extend(st.session_state["selected_matches"])
-    # 去重保序
     all_matches = list(dict.fromkeys(all_matches))
     
     if not all_matches:
