@@ -57,6 +57,7 @@ SUPPORTED_LEAGUES = ["英超", "西甲", "德甲", "意甲", "法甲",
                      "挪超", "瑞超", "丹超", "芬超"]
 
 
+# ============ 数据库 ============
 def get_db_engine():
     if not db_url or not db_url.startswith("postgresql"):
         return None
@@ -199,6 +200,7 @@ def load_model_from_db():
         return None
 
 
+# ============ 训练数据下载 ============
 def download_league_csv(league_cn, seasons=TRAINING_SEASONS):
     code = LEAGUE_CODE_MAP.get(league_cn)
     if not code:
@@ -334,6 +336,7 @@ def predict_with_model(model_tuple, odds):
     return lr.predict_proba(scaler.transform(features))[0], xgb.predict_proba(features)[0]
 
 
+# ============ 参数体系 ============
 def current_season():
     now = datetime.now()
     return now.year if now.month >= 7 else now.year - 1
@@ -354,7 +357,6 @@ def get_default_params():
     for lg in SUPPORTED_LEAGUES:
         by_league[lg] = copy.deepcopy(default)
 
-    # 联赛差异化初始值
     by_league["英超"]["weights"] = {"injury": 0.22, "home_away": 0.20, "h2h": 0.15, "form": 0.22, "motivation": 0.21}
     by_league["德甲"]["weights"] = {"injury": 0.20, "home_away": 0.20, "h2h": 0.15, "form": 0.24, "motivation": 0.21}
     by_league["意甲"]["weights"] = {"injury": 0.21, "home_away": 0.19, "h2h": 0.16, "form": 0.21, "motivation": 0.23}
@@ -368,16 +370,12 @@ def get_default_params():
     by_league["欧联"]["weights"] = {"injury": 0.22, "home_away": 0.19, "h2h": 0.18, "form": 0.23, "motivation": 0.18}
     by_league["欧协联"]["weights"] = {"injury": 0.22, "home_away": 0.19, "h2h": 0.18, "form": 0.23, "motivation": 0.18}
 
-    # 欧战扩展权重加大
     by_league["欧冠"]["extended_weights"] = {"schedule": 0.6, "travel": 0.4, "eu_pressure": 0.8}
     by_league["欧联"]["extended_weights"] = {"schedule": 0.6, "travel": 0.4, "eu_pressure": 0.8}
     by_league["欧协联"]["extended_weights"] = {"schedule": 0.5, "travel": 0.4, "eu_pressure": 0.7}
-
-    # 北欧旅途权重加大
     by_league["挪超"]["extended_weights"] = {"schedule": 0.5, "travel": 0.6, "eu_pressure": 0.5}
     by_league["瑞超"]["extended_weights"] = {"schedule": 0.5, "travel": 0.6, "eu_pressure": 0.5}
     by_league["芬超"]["extended_weights"] = {"schedule": 0.5, "travel": 0.7, "eu_pressure": 0.5}
-
     return {"default": default, "by_league": by_league}
 
 
@@ -389,6 +387,7 @@ def get_params_for_league(params, league_cn):
     return params["default"]
 
 
+# Session state
 if "params" not in st.session_state:
     st.session_state["params"] = get_default_params()
 else:
@@ -412,6 +411,9 @@ if "model_loaded" not in st.session_state:
             st.session_state["model_loaded"] = True
     except Exception:
         pass
+
+
+# ============ 工具函数 ============
 POSITION_CN = {"Goalkeeper": "门将", "Defender": "后卫", "Midfielder": "中场",
                "Attacker": "前锋", "Forward": "前锋"}
 
@@ -487,6 +489,7 @@ def parse_match(m):
     return " ".join(parts[:mid]), " ".join(parts[mid:])
 
 
+# ============ API 调用 ============
 @st.cache_data(ttl=3600)
 def search_fixtures_by_date(date_str):
     try:
@@ -666,17 +669,7 @@ def get_recent_form(team_id, last=10):
         return []
 
 
-@st.cache_data(ttl=3600)
-def get_team_upcoming(team_id, last=10):
-    """获取球队最近+未来比赛（用于赛程密度计算）"""
-    try:
-        r = requests.get(f"{BASE_URL}/fixtures", headers=HEADERS,
-                         params={"team": team_id, "last": last}, timeout=10)
-        return r.json().get("response", [])
-    except Exception:
-        return []
-
-
+# ============ 系数计算 ============
 def calc_injury_coef(injuries, home_id, away_id):
     pos_w = {"Goalkeeper": 1.2, "Defender": 1.1, "Midfielder": 1.0, "Attacker": 1.1}
     hs, as_ = 0, 0
@@ -834,6 +827,8 @@ def check_data_health(injuries, h2h, h_recent, a_recent, odds):
     score = sum(1 for c in checks if c[0] == "✅") / len(checks) * 100
     return checks, round(score)
 
+
+# ============ 分析单场 ============
 def analyze_match(home_name, away_name, date_hint=None):
     hid, hs = search_team(home_name)
     aid, as_ = search_team(away_name)
@@ -885,7 +880,6 @@ def analyze_match(home_name, away_name, date_hint=None):
     h2h_coef = calc_h2h_coef(h2h, hid)
     form_coef = calc_form_diff(hr, ar, hid, aid)
 
-    # ===== 扩展特征 =====
     rest_days_home, sched_home = calc_schedule_density(hr_all, hid, match_date_str)
     rest_days_away, sched_away = calc_schedule_density(ar_all, aid, match_date_str)
     if rest_days_home is not None and rest_days_away is not None:
@@ -896,7 +890,6 @@ def analyze_match(home_name, away_name, date_hint=None):
     travel_km = get_travel_km(hs, as_)
     travel_coef = calc_travel_factor(travel_km)
 
-    # 欧战跨联赛压制
     _, _, league_cn_tmp, _ = get_league_info(lid, lname)
     eu_pressure = 0.0
     if is_eu_match(league_cn_tmp):
@@ -1336,11 +1329,9 @@ with tab2:
             st.success(f"✅ 合计 {tw:.2f}")
 
     st.markdown("**② 扩展特征权重**")
-    e1, e2, e3 = st.columns(3)
     if "extended_weights" not in params_now:
         params_now["extended_weights"] = {"schedule": 0.5, "travel": 0.3, "eu_pressure": 0.5}
-    e1.number_input(f"{scope} · 赛程密度", 0.0, 2.0, float(params_now["extended_weights"].get("schedule", 0.5)), 0.05, key=f"sch_{scope}")
-    params_now["extended_weights"]["schedule"] = e1.number_input(f"{scope} · 赛程密度w", 0.0, 2.0, float(params_now["extended_weights"].get("schedule", 0.5)), 0.05, key=f"schw_{scope}")
+    params_now["extended_weights"]["schedule"] = st.slider(f"{scope} · 赛程密度", 0.0, 2.0, float(params_now["extended_weights"].get("schedule", 0.5)), 0.05, key=f"sch_{scope}")
     params_now["extended_weights"]["travel"] = st.slider(f"{scope} · 旅途疲劳", 0.0, 2.0, float(params_now["extended_weights"].get("travel", 0.3)), 0.05, key=f"trv_{scope}")
     params_now["extended_weights"]["eu_pressure"] = st.slider(f"{scope} · 欧战压制", 0.0, 2.0, float(params_now["extended_weights"].get("eu_pressure", 0.5)), 0.05, key=f"eu_{scope}")
 
@@ -1456,4 +1447,3 @@ with tab3:
                                     update_result(h["id"], res)
                                     st.success("已保存")
                                     st.rerun()
-        
