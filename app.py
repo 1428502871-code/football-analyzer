@@ -6,7 +6,6 @@ import requests
 import numpy as np
 from datetime import datetime, timedelta
 
-# 从独立文件导入球队映射
 from teams_cn import CN_TEAM_MAP, EN_TO_CN, cn_to_en, en_to_cn
 
 st.set_page_config(page_title="足球分析模型", layout="wide", page_icon="⚽")
@@ -24,7 +23,6 @@ def current_season():
 
 WEIGHTS = {"injury": 0.20, "home_away": 0.20, "h2h": 0.18, "form": 0.21, "motivation": 0.21}
 
-# ============ 伤停原因中文映射 ============
 INJURY_REASON_CN = {
     "Hamstring Injury": "腿筋受伤", "Knee Injury": "膝伤", "Ankle Injury": "脚踝伤",
     "Muscle Injury": "肌肉伤", "Thigh Injury": "大腿伤", "Groin Injury": "腹股沟伤",
@@ -110,7 +108,6 @@ def translate_player(name):
     return name
 
 
-# ============ 联赛映射 ============
 LEAGUE_MAP = {
     39:  (0.65, 0.35, "英超", "顶级"), 140: (0.55, 0.45, "西甲", "顶级"),
     78:  (0.65, 0.35, "德甲", "顶级"), 135: (0.65, 0.35, "意甲", "顶级"),
@@ -176,30 +173,25 @@ def search_fixtures_by_date(date_str):
 
 @st.cache_data(ttl=3600)
 def search_team(name):
-    """多轮降级搜索，解决特殊字符、未收录球队问题"""
     en_name = cn_to_en(name)
 
     candidates = [en_name]
 
-    # 候选2：去特殊字符
     cleaned = en_name.replace("/", " ").replace("-", " ").replace(".", "").replace("  ", " ").strip()
     if cleaned != en_name:
         candidates.append(cleaned)
 
-    # 候选3：去重音符号
     accents = {"ø": "o", "å": "a", "æ": "ae", "ö": "o", "ä": "a", "ü": "u",
                "é": "e", "è": "e", "í": "i", "ó": "o", "á": "a", "ñ": "n", "ç": "c"}
     deacc = "".join(accents.get(c.lower(), c) for c in en_name)
     if deacc != en_name:
         candidates.append(deacc)
 
-    # 候选4：取第一个词
     if " " in en_name or "/" in en_name:
         first_word = en_name.replace("/", " ").split()[0]
         if first_word not in candidates:
             candidates.append(first_word)
 
-    # 候选5：去重音后再去特殊字符
     deacc_cleaned = deacc.replace("/", " ").replace("-", " ").replace(".", "").strip()
     if deacc_cleaned not in candidates:
         candidates.append(deacc_cleaned)
@@ -430,21 +422,37 @@ def check_data_health(injuries, h2h, h_recent, a_recent, odds):
     return checks, round(score)
 
 
-# ============ 分析单场 ============
-def analyze_match(home_name, away_name):
+# ============ 分析单场（支持指定日期） ============
+def analyze_match(home_name, away_name, date_hint=None):
     home_id, home_std = search_team(home_name)
     away_id, away_std = search_team(away_name)
     if not home_id or not away_id:
         return None, f"球队搜索失败：{home_name} / {away_name}（可尝试补充到映射表）"
 
     fixture = None
-    for offset in range(0, 4):
-        d = (datetime.now() + timedelta(days=offset)).strftime("%Y-%m-%d")
-        fixture = get_fixture(home_id, away_id, d)
-        if fixture:
-            break
+    if date_hint:
+        # 优先用指定日期
+        fixture = get_fixture(home_id, away_id, date_hint)
+        if not fixture:
+            try:
+                base_date = datetime.strptime(date_hint, "%Y-%m-%d")
+                for offset in [-1, 1, -2, 2, 3]:
+                    d = (base_date + timedelta(days=offset)).strftime("%Y-%m-%d")
+                    fixture = get_fixture(home_id, away_id, d)
+                    if fixture:
+                        break
+            except Exception:
+                pass
+    else:
+        # 默认：从今天向后找4天
+        for offset in range(0, 4):
+            d = (datetime.now() + timedelta(days=offset)).strftime("%Y-%m-%d")
+            fixture = get_fixture(home_id, away_id, d)
+            if fixture:
+                break
+
     if not fixture:
-        return None, f"未找到近期比赛：{home_std} vs {away_std}"
+        return None, f"未找到比赛：{home_std} vs {away_std}"
 
     fid = fixture["fixture"]["id"]
     league_id = fixture["league"]["id"]
@@ -574,7 +582,8 @@ if "date_fixtures" in st.session_state:
             time_str = f["fixture"]["date"][11:16]
             opt = f"[{league_cn}] {home_cn} vs {away_cn} ({time_str})"
             options.append(opt)
-            opt_to_match[opt] = f"{home_cn} {away_cn}"
+            _date_str = st.session_state.get("date_fixtures_date", datetime.now().strftime("%Y-%m-%d"))
+            opt_to_match[opt] = f"{home_cn} {away_cn}@{_date_str}"
 
         selected = st.multiselect("勾选要分析的比赛", options)
         col_c, col_d = st.columns(2)
@@ -622,11 +631,15 @@ if st.button("🚀 开始批量分析", type="primary"):
         progress = st.progress(0)
         for i, m in enumerate(all_matches):
             progress.progress((i + 1) / len(all_matches), text=f"正在分析：{m}")
-            home, away = parse_match(m)
+            if "@" in m:
+                match_part, date_part = m.rsplit("@", 1)
+            else:
+                match_part, date_part = m, None
+            home, away = parse_match(match_part)
             if not home or not away:
                 st.warning(f"无法解析：{m}")
                 continue
-            r, err = analyze_match(home, away)
+            r, err = analyze_match(home, away, date_part)
             if err:
                 st.warning(err)
             else:
