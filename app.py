@@ -201,9 +201,31 @@ def search_team(name):
             r = requests.get(f"{BASE_URL}/teams", headers=HEADERS,
                              params={"search": cand}, timeout=10)
             data = r.json()
-            if data.get("response"):
-                t = data["response"][0]["team"]
-                return t["id"], t["name"]
+            if not data.get("response"):
+                continue
+
+            # ★ 核心改动：多个结果时选名字最匹配的，而不是取第一个
+            cand_lower = cand.lower()
+            best = None
+            best_score = -1
+            for item in data["response"]:
+                t = item["team"]
+                team_name = (t.get("name") or "").lower()
+                score = 0
+                if team_name == cand_lower:
+                    score = 1000
+                elif team_name.startswith(cand_lower):
+                    score = 100 + len(cand_lower)
+                elif cand_lower in team_name:
+                    score = 50 * len(cand_lower) / max(len(team_name), 1)
+                elif team_name in cand_lower:
+                    score = 40 * len(team_name) / max(len(cand_lower), 1)
+                if score > best_score:
+                    best_score = score
+                    best = t
+
+            if best:
+                return best["id"], best["name"]
         except Exception:
             continue
 
@@ -431,7 +453,6 @@ def analyze_match(home_name, away_name, date_hint=None):
 
     fixture = None
     if date_hint:
-        # 优先用指定日期
         fixture = get_fixture(home_id, away_id, date_hint)
         if not fixture:
             try:
@@ -444,7 +465,6 @@ def analyze_match(home_name, away_name, date_hint=None):
             except Exception:
                 pass
     else:
-        # 默认：从今天向后找4天
         for offset in range(0, 4):
             d = (datetime.now() + timedelta(days=offset)).strftime("%Y-%m-%d")
             fixture = get_fixture(home_id, away_id, d)
