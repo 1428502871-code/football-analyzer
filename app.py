@@ -6,7 +6,10 @@ import requests
 import numpy as np
 import copy
 import json
+import re
 from datetime import datetime, timedelta
+from scipy.stats import poisson
+from scipy.optimize import minimize
 
 from teams_cn import CN_TEAM_MAP, EN_TO_CN, cn_to_en, en_to_cn, translate_injury_reason
 
@@ -307,6 +310,40 @@ def get_odds(fixture_id):
 
 
 @st.cache_data(ttl=3600)
+def get_asian_handicap(fixture_id):
+    """抓取亚洲让球盘，返回 (盘口, 主赔率, 客赔率)"""
+    try:
+        r = requests.get(f"{BASE_URL}/odds", headers=HEADERS,
+                         params={"fixture": fixture_id, "bookmaker": 2}, timeout=10)
+        data = r.json()
+        if data.get("response"):
+            for bm in data["response"][0].get("bookmakers", []):
+                for bet in bm.get("bets", []):
+                    if bet["id"] == 4:  # Asian Handicap
+                        vals = bet["values"]
+                        for v in vals:
+                            val_str = v.get("value", "")
+                            # 匹配 "Home -1" 或 "Home +0.5" 这类格式
+                            m = re.search(r'Home\s+([+-]?\d+(?:\.\d+)?)', val_str)
+                            if m:
+                                handicap = float(m.group(1))
+                                home_odd = float(v.get("odd", 0)) or None
+                                # 找对应的客队赔率
+                                away_str = f"Away {abs(handicap):+g}" if handicap < 0 else f"Away {-abs(handicap):+g}"
+                                away_str2 = val_str.replace("Home", "Away").replace(str(handicap), str(-handicap))
+                                away_odd = None
+                                for v2 in vals:
+                                    if v2.get("value", "") == away_str2:
+                                        away_odd = float(v2.get("odd", 0)) or None
+                                        break
+                                if home_odd:
+                                    return handicap, home_odd, away_odd
+    except Exception:
+        pass
+    return None, None, None
+
+
+@st.cache_data(ttl=3600)
 def get_injuries(fixture_id):
     try:
         r = requests.get(f"{BASE_URL}/injuries", headers=HEADERS,
@@ -462,6 +499,49 @@ def calc_all_probs(odds, coefs, league_id, params, league_name=""):
     }
 
 
+# ============ 泊松让球概率计算 ============
+def fit_poisson_lambdas(p_h, p_d, p_a, max_goals=10):
+    """从市场胜平负概率反推主客队的泊松 λ（期望进球）"""
+    def loss(params):
+        lh, la = params
+        if lh <= 0.05 or la <= 0.05 or lh > 6 or la > 6:
+            return 999
+        ph = pd_ = pa = 0.0
+        for i in range(max_goals):
+            for j in range(max_goals):
+                prob = poisson.pmf(i, lh) * poisson.pmf(j, la)
+                if i > j:
+                    ph += prob
+                elif i == j:
+                    pd_ += prob
+                else:
+                    pa += prob
+        return (ph - p_h) ** 2 + (pd_ - p_d) ** 2 + (pa - p_a) ** 2
+
+    result = minimize(loss, [1.4, 1.1], method="Nelder-Mead",
+                      options={"xatol": 1e-4, "fatol": 1e-6, "maxiter": 200})
+    return float(result.x[0]), float(result.x[1])
+
+
+def calc_handicap_probs(lh, la, handicap, max_goals=12):
+    """计算让球后概率（简化口径：让球后净胜球>0=让球主胜，=0=走水，<0=让球客胜）"""
+    ph = pd_ = pa = 0.0
+    for i in range(max_goals):
+        for j in range(max_goals):
+            prob = poisson.pmf(i, lh) * poisson.pmf(j, la)
+            diff = i + handicap - j  # 让球后净胜球
+            if diff > 0:
+                ph += prob
+            elif abs(diff) < 0.01:
+                pd_ += prob
+            else:
+                pa += prob
+    total = ph + pd_ + pa
+    if total <= 0:
+        return 0, 0, 0
+    return round(ph / total * 100, 1), round(pd_ / total * 100, 1), round(pa / total * 100, 1)
+
+
 def check_data_health(injuries, h2h, h_recent, a_recent, odds):
     checks = []
     checks.append(("✅", "赔率数据", "完整") if odds and odds[0] else ("❌", "赔率数据", "缺失"))
@@ -514,6 +594,7 @@ def analyze_match(home_name, away_name, date_hint=None):
     h2h = get_h2h(home_id, away_id)
     h_recent = get_recent_form(home_id)
     a_recent = get_recent_form(away_id)
+    handicap, ah_home_odd, ah_away_odd = get_asian_handicap(fid)
 
     inj_coef, _, _ = calc_injury_coef(injuries, home_id, away_id)
     h2h_coef = calc_h2h_coef(h2h, home_id)
@@ -571,6 +652,8 @@ def analyze_match(home_name, away_name, date_hint=None):
         "league_api": league_name_api, "league_country": league_country,
         "league_id": league_id,
         "odds": odds, "coefs": coefs,
+        "handicap": handicap,
+        "ah_home_odd": ah_home_odd, "ah_away_odd": ah_away_odd,
         "injuries": inj_list, "h2h": h2h_list,
         "home_recent": fmt_recent(h_recent, home_id, home_cn),
         "away_recent": fmt_recent(a_recent, away_id, away_cn),
@@ -714,10 +797,29 @@ with tab1:
                 p = calc_all_probs(r["odds"], r["coefs"], r["league_id"], params, r["league_api"])
                 st.markdown(f"### {r['match']}")
                 st.caption(f"🏆 {p['league_cn']} → 模型{int(p['model_w']*100)}% / 市场{int(p['market_w']*100)}%")
+
+                # 亚盘盘口信息
+                if r["handicap"] is not None:
+                    st.caption(f"🎯 亚盘盘口：主 {r['handicap']:+.2f}（赔率 {r['ah_home_odd']}）")
+
                 col1, col2, col3 = st.columns(3)
                 col1.metric("主胜", f"{p['final'][0]}%")
                 col2.metric("平局", f"{p['final'][1]}%")
                 col3.metric("客胜", f"{p['final'][2]}%")
+
+                # 让球胜平负
+                if r["handicap"] is not None:
+                    with st.container(border=True):
+                        st.markdown("**🎯 让球胜平负（基于泊松分布）**")
+                        market_p = devig(r["odds"])
+                        lh, la = fit_poisson_lambdas(market_p[0], market_p[1], market_p[2])
+                        h_win, h_draw, h_loss = calc_handicap_probs(lh, la, r["handicap"])
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric(f"让球主胜 ({r['handicap']:+.2f})", f"{h_win}%")
+                        c2.metric("走水", f"{h_draw}%")
+                        c3.metric(f"让球客胜 ({-r['handicap']:+.2f})", f"{h_loss}%")
+                        st.caption(f"泊松参数：主队 λ={lh:.2f}，客队 λ={la:.2f}（由市场概率反推）")
+
                 with st.expander("🔍 数据依据"):
                     st.markdown(f"**数据健康度：{r['health_score']}%**")
                     for ic, nm, dt in r["health"]:
@@ -747,23 +849,49 @@ with tab1:
                         st.dataframe(pd.DataFrame(r["h2h"]), hide_index=True)
                     st.markdown(f"**赔率**：主 {r['odds'][0]} / 平 {r['odds'][1]} / 客 {r['odds'][2]}")
 
+        # ============ 二串一推荐（含让球） ============
         st.markdown("---")
         st.subheader("🎯 今日最稳二串一推荐")
+        st.caption("包含胜平负 + 让球胜平负两种玩法候选")
+
         candidates = []
         for r in st.session_state["results"]:
             p = calc_all_probs(r["odds"], r["coefs"], r["league_id"], params, r["league_api"])
             pf = p["final"]
             mi = int(np.argmax(pf))
+            # 胜平负候选
             if pf[mi] > 60 and 1.30 <= r["odds"][mi] <= 2.50 and r["health_score"] >= 80:
                 candidates.append({
                     "match": r["match"], "league": p["league_cn"],
-                    "pick": ["主胜", "平局", "客胜"][mi],
-                    "prob": pf[mi], "odd": r["odds"][mi], "health": r["health_score"]
+                    "pick": ["主胜", "平局", "客胜"][mi] + "（胜平负）",
+                    "prob": float(pf[mi]), "odd": r["odds"][mi], "health": r["health_score"]
                 })
+            # 让球候选
+            if r["handicap"] is not None and r["ah_home_odd"]:
+                market_p = devig(r["odds"])
+                lh, la = fit_poisson_lambdas(market_p[0], market_p[1], market_p[2])
+                h_win, h_draw, h_loss = calc_handicap_probs(lh, la, r["handicap"])
+                # 让球主胜或让球客胜选优
+                if h_win > h_loss and h_win > 62 and 1.30 <= r["ah_home_odd"] <= 2.50:
+                    candidates.append({
+                        "match": r["match"], "league": p["league_cn"],
+                        "pick": f"让球主胜 ({r['handicap']:+.2f})",
+                        "prob": h_win, "odd": r["ah_home_odd"], "health": r["health_score"]
+                    })
+                elif h_loss > h_win and h_loss > 62 and r["ah_away_odd"] and 1.30 <= r["ah_away_odd"] <= 2.50:
+                    candidates.append({
+                        "match": r["match"], "league": p["league_cn"],
+                        "pick": f"让球客胜 ({-r['handicap']:+.2f})",
+                        "prob": h_loss, "odd": r["ah_away_odd"], "health": r["health_score"]
+                    })
+
         best, bs = None, 0
         for i in range(len(candidates)):
             for j in range(i + 1, len(candidates)):
                 c1, c2 = candidates[i], candidates[j]
+                # 避免同一场比赛的两个玩法组合
+                if c1["match"] == c2["match"]:
+                    continue
                 to = c1["odd"] * c2["odd"]
                 if 1.7 <= to <= 4.0:
                     hr = (c1["prob"] / 100) * (c2["prob"] / 100)
@@ -775,11 +903,11 @@ with tab1:
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown(f"**🥇 {c1['match']}**")
-                st.markdown(f"{c1['pick']} | 概率 {c1['prob']}% | 赔率 {c1['odd']}")
+                st.markdown(f"**{c1['pick']}** | 概率 {c1['prob']}% | 赔率 {c1['odd']}")
             with col2:
                 st.markdown(f"**🥈 {c2['match']}**")
-                st.markdown(f"{c2['pick']} | 概率 {c2['prob']}% | 赔率 {c2['odd']}")
-            st.markdown(f"**组合赔率 {to:.2f}**")
+                st.markdown(f"**{c2['pick']}** | 概率 {c2['prob']}% | 赔率 {c2['odd']}")
+            st.markdown(f"**组合赔率 {to:.2f}**（1.7-4.0 区间）")
         else:
             st.warning("⚠️ 今日无符合条件的二串一推荐")
 
@@ -840,7 +968,6 @@ with tab2:
 with tab3:
     st.subheader("📚 历史分析记录")
 
-    # 首次进入此标签页时，自动回填赛果（放在这里避免启动期调用）
     if "auto_checked_tab3" not in st.session_state:
         st.session_state["auto_checked_tab3"] = True
         try:
