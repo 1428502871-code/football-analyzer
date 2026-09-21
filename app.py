@@ -500,38 +500,57 @@ def search_fixtures_by_date(date_str):
         return []
 
 
+# ★ 修复版：用正则精确过滤女足/二队，不再误伤 W 开头球队
 @st.cache_data(ttl=3600)
 def search_team(name):
     en_name = cn_to_en(name)
     candidates = [en_name]
     cleaned = en_name.replace("/", " ").replace("-", " ").replace(".", "").replace("  ", " ").strip()
-    if cleaned != en_name: candidates.append(cleaned)
+    if cleaned != en_name:
+        candidates.append(cleaned)
     accents = {"ø": "o", "å": "a", "æ": "ae", "ö": "o", "ä": "a", "ü": "u",
-        "é": "e", "è": "e", "í": "i", "ó": "o", "á": "a", "ñ": "n", "ç": "c"}
+               "é": "e", "è": "e", "í": "i", "ó": "o", "á": "a", "ñ": "n", "ç": "c"}
     deacc = "".join(accents.get(c.lower(), c) for c in en_name)
-    if deacc != en_name: candidates.append(deacc)
+    if deacc != en_name:
+        candidates.append(deacc)
     if " " in en_name or "/" in en_name:
         first_word = en_name.replace("/", " ").split()[0]
-        if first_word not in candidates: candidates.append(first_word)
+        if first_word not in candidates:
+            candidates.append(first_word)
+    deacc_cleaned = deacc.replace("/", " ").replace("-", " ").replace(".", "").strip()
+    if deacc_cleaned not in candidates:
+        candidates.append(deacc_cleaned)
+
+    exclude_patterns = [
+        r'\bwomen\b', r'\bfeminine\b', r'\bladies\b', r'\bfemale\b',
+        r'\bu-?19\b', r'\bu-?21\b', r'\bu-?23\b', r'\byouth\b',
+        r'\bacademy\b', r'\breserves\b', r'\(w\)', r'\bwfc\b',
+        r'\sw\s', r'\sw$', r'^w\s'
+    ]
+
     for cand in candidates:
         try:
-            r = requests.get(f"{BASE_URL}/teams", headers=HEADERS, params={"search": cand}, timeout=10)
+            r = requests.get(f"{BASE_URL}/teams", headers=HEADERS,
+                             params={"search": cand}, timeout=10)
             data = r.json()
-            if not data.get("response"): continue
+            if not data.get("response"):
+                continue
             cl = cand.lower()
             best, bs = None, -1
             for item in data["response"]:
                 t = item["team"]
                 tn = (t.get("name") or "")
                 tnl = tn.lower()
-                exclude_keywords = [" w", "women", "feminine", "ladies", "female",
-                    " u19", " u21", " u23", " ii", "youth", "academy", "reserves", "(w)"]
-                if any(kw in " " + tnl + " " for kw in exclude_keywords): continue
-                score = 1000 if tnl == cl else (100 + len(cl) if tnl.startswith(cl) else (
-                    50 * len(cl) / max(len(tnl), 1) if cl in tnl else (
-                    40 * len(tnl) / max(len(cl), 1) if tnl in cl else 0)))
-                if score > bs: bs, best = score, t
-            if best: return best["id"], best["name"]
+                if any(re.search(pat, " " + tnl + " ") for pat in exclude_patterns):
+                    continue
+                score = 1000 if tnl == cl else (
+                    100 + len(cl) if tnl.startswith(cl) else (
+                        50 * len(cl) / max(len(tnl), 1) if cl in tnl else (
+                            40 * len(tnl) / max(len(cl), 1) if tnl in cl else 0)))
+                if score > bs:
+                    bs, best = score, t
+            if best:
+                return best["id"], best["name"]
         except Exception:
             continue
     return None, None
@@ -1438,9 +1457,6 @@ with tab4:
                 c3.metric("XGB LogLoss", f"{log['xgb_logloss']:.4f}")
                 if log.get("notes"): st.caption(log["notes"])
 
-# ================================================================
-# ============ Tab5：球队搜索诊断 ============
-# ================================================================
 with tab5:
     st.subheader("🔍 球队搜索诊断")
     st.caption("批量测试球队名，看哪些能搜到、哪些搜不到。把失败的队名发给我，我一次性补进映射表。")
