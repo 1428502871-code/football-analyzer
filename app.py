@@ -57,7 +57,6 @@ SUPPORTED_LEAGUES = ["英超", "西甲", "德甲", "意甲", "法甲",
                      "挪超", "瑞超", "丹超", "芬超"]
 
 
-# ============ 数据库 ============
 def get_db_engine():
     if not db_url or not db_url.startswith("postgresql"):
         return None
@@ -200,7 +199,6 @@ def load_model_from_db():
         return None
 
 
-# ============ 训练数据下载 ============
 def download_league_csv(league_cn, seasons=TRAINING_SEASONS):
     code = LEAGUE_CODE_MAP.get(league_cn)
     if not code:
@@ -336,7 +334,6 @@ def predict_with_model(model_tuple, odds):
     return lr.predict_proba(scaler.transform(features))[0], xgb.predict_proba(features)[0]
 
 
-# ============ 参数体系 ============
 def current_season():
     now = datetime.now()
     return now.year if now.month >= 7 else now.year - 1
@@ -356,7 +353,6 @@ def get_default_params():
     by_league = {}
     for lg in SUPPORTED_LEAGUES:
         by_league[lg] = copy.deepcopy(default)
-
     by_league["英超"]["weights"] = {"injury": 0.22, "home_away": 0.20, "h2h": 0.15, "form": 0.22, "motivation": 0.21}
     by_league["德甲"]["weights"] = {"injury": 0.20, "home_away": 0.20, "h2h": 0.15, "form": 0.24, "motivation": 0.21}
     by_league["意甲"]["weights"] = {"injury": 0.21, "home_away": 0.19, "h2h": 0.16, "form": 0.21, "motivation": 0.23}
@@ -369,7 +365,6 @@ def get_default_params():
     by_league["欧冠"]["weights"] = {"injury": 0.24, "home_away": 0.18, "h2h": 0.18, "form": 0.22, "motivation": 0.18}
     by_league["欧联"]["weights"] = {"injury": 0.22, "home_away": 0.19, "h2h": 0.18, "form": 0.23, "motivation": 0.18}
     by_league["欧协联"]["weights"] = {"injury": 0.22, "home_away": 0.19, "h2h": 0.18, "form": 0.23, "motivation": 0.18}
-
     by_league["欧冠"]["extended_weights"] = {"schedule": 0.6, "travel": 0.4, "eu_pressure": 0.8}
     by_league["欧联"]["extended_weights"] = {"schedule": 0.6, "travel": 0.4, "eu_pressure": 0.8}
     by_league["欧协联"]["extended_weights"] = {"schedule": 0.5, "travel": 0.4, "eu_pressure": 0.7}
@@ -387,7 +382,6 @@ def get_params_for_league(params, league_cn):
     return params["default"]
 
 
-# Session state
 if "params" not in st.session_state:
     st.session_state["params"] = get_default_params()
 else:
@@ -413,7 +407,6 @@ if "model_loaded" not in st.session_state:
         pass
 
 
-# ============ 工具函数 ============
 POSITION_CN = {"Goalkeeper": "门将", "Defender": "后卫", "Midfielder": "中场",
                "Attacker": "前锋", "Forward": "前锋"}
 
@@ -500,6 +493,7 @@ def search_fixtures_by_date(date_str):
         return []
 
 
+# ★ 修复1：排除女足/二队
 @st.cache_data(ttl=3600)
 def search_team(name):
     en_name = cn_to_en(name)
@@ -516,6 +510,7 @@ def search_team(name):
         first_word = en_name.replace("/", " ").split()[0]
         if first_word not in candidates:
             candidates.append(first_word)
+
     for cand in candidates:
         try:
             r = requests.get(f"{BASE_URL}/teams", headers=HEADERS,
@@ -527,11 +522,23 @@ def search_team(name):
             best, bs = None, -1
             for item in data["response"]:
                 t = item["team"]
-                tn = (t.get("name") or "").lower()
-                score = 1000 if tn == cl else (
-                    100 + len(cl) if tn.startswith(cl) else (
-                        50 * len(cl) / max(len(tn), 1) if cl in tn else (
-                            40 * len(tn) / max(len(cl), 1) if tn in cl else 0)))
+                tn = (t.get("name") or "")
+                tnl = tn.lower()
+                # 排除女足/二队/青年队
+                exclude_keywords = [" w", "women", "feminine", "ladies", "female",
+                                    " u19", " u21", " u23", " ii", "youth",
+                                    "academy", "reserves", "(w)"]
+                skip = False
+                for kw in exclude_keywords:
+                    if kw in " " + tnl + " ":
+                        skip = True
+                        break
+                if skip:
+                    continue
+                score = 1000 if tnl == cl else (
+                    100 + len(cl) if tnl.startswith(cl) else (
+                        50 * len(cl) / max(len(tnl), 1) if cl in tnl else (
+                            40 * len(tnl) / max(len(cl), 1) if tnl in cl else 0)))
                 if score > bs:
                     bs, best = score, t
             if best:
@@ -554,24 +561,29 @@ def get_fixture(home_id, away_id, date_str):
     return None
 
 
+# ★ 修复2：多博彩公司降级
 @st.cache_data(ttl=3600)
 def get_odds(fixture_id):
-    try:
-        r = requests.get(f"{BASE_URL}/odds", headers=HEADERS,
-                         params={"fixture": fixture_id, "bookmaker": 2}, timeout=10)
-        data = r.json()
-        if data.get("response"):
-            for bm in data["response"][0].get("bookmakers", []):
-                for bet in bm.get("bets", []):
-                    if bet["id"] == 1:
-                        vals = bet["values"]
-                        h = next((float(v["odd"]) for v in vals if v["value"] == "Home"), None)
-                        d = next((float(v["odd"]) for v in vals if v["value"] == "Draw"), None)
-                        a = next((float(v["odd"]) for v in vals if v["value"] == "Away"), None)
-                        if h and d and a:
-                            return h, d, a
-    except Exception:
-        pass
+    for bm_id in [2, 8, 10, None]:
+        try:
+            params = {"fixture": fixture_id}
+            if bm_id is not None:
+                params["bookmaker"] = bm_id
+            r = requests.get(f"{BASE_URL}/odds", headers=HEADERS,
+                             params=params, timeout=10)
+            data = r.json()
+            if data.get("response"):
+                for bm in data["response"][0].get("bookmakers", []):
+                    for bet in bm.get("bets", []):
+                        if bet["id"] == 1:
+                            vals = bet["values"]
+                            h = next((float(v["odd"]) for v in vals if v["value"] == "Home"), None)
+                            d = next((float(v["odd"]) for v in vals if v["value"] == "Draw"), None)
+                            a = next((float(v["odd"]) for v in vals if v["value"] == "Away"), None)
+                            if h and d and a:
+                                return h, d, a
+        except Exception:
+            continue
     return None, None, None
 
 
@@ -669,7 +681,6 @@ def get_recent_form(team_id, last=10):
         return []
 
 
-# ============ 系数计算 ============
 def calc_injury_coef(injuries, home_id, away_id):
     pos_w = {"Goalkeeper": 1.2, "Defender": 1.1, "Midfielder": 1.0, "Attacker": 1.1}
     hs, as_ = 0, 0
@@ -730,20 +741,16 @@ def calc_all_probs(odds, coefs, league_id, params, league_name="",
                    schedule_coef=0.0, travel_coef=0.0, eu_pressure=0.0):
     _, _, league_cn, _ = get_league_info(league_id, league_name)
     league_params = get_params_for_league(params, league_cn)
-
     weights = league_params["weights"]
     ew = league_params.get("extended_weights", {"schedule": 0.5, "travel": 0.3, "eu_pressure": 0.5})
     mf = league_params["model_fusion"]
     override = league_params.get("market_fusion_override")
-
     market_p = np.array(devig(odds))
     base_adjust = sum(coefs.get(k, 0) * weights[k] for k in weights)
-
     ext_adjust = (schedule_coef * ew.get("schedule", 0.5) +
                   travel_coef * ew.get("travel", 0.3) +
                   eu_pressure * ew.get("eu_pressure", 0.5))
     adjust = base_adjust + ext_adjust * 0.3
-
     model_used = "公式"
     if st.session_state.get("model_loaded") and st.session_state.get("model_tuple"):
         try:
@@ -757,16 +764,13 @@ def calc_all_probs(odds, coefs, league_id, params, league_name="",
     else:
         lr_p = softmax3(market_p, adjust * 0.5)
         xgb_p = softmax3(market_p, adjust * 1.0)
-
     model_p = mf["lr"] * lr_p + mf["xgb"] * xgb_p
     model_p = model_p * np.array([1 + adjust * 0.15, 1 - adjust * 0.05, 1 - adjust * 0.1])
     model_p = model_p / model_p.sum()
-
     if override is not None:
         mw, mkw = override, 1 - override
     else:
         mw, mkw, _, _ = get_league_info(league_id, league_name)
-
     final_p = mw * model_p + mkw * market_p
     final_p = final_p / final_p.sum()
     return {
@@ -828,7 +832,7 @@ def check_data_health(injuries, h2h, h_recent, a_recent, odds):
     return checks, round(score)
 
 
-# ============ 分析单场 ============
+# ★ 修复3：搜索范围 4 → 10 天
 def analyze_match(home_name, away_name, date_hint=None):
     hid, hs = search_team(home_name)
     aid, as_ = search_team(away_name)
@@ -841,7 +845,7 @@ def analyze_match(home_name, away_name, date_hint=None):
         if not fixture:
             try:
                 bd = datetime.strptime(date_hint, "%Y-%m-%d")
-                for off in [-1, 1, -2, 2, 3]:
+                for off in [-1, 1, -2, 2, -3, 3, -4, 4]:
                     d = (bd + timedelta(days=off)).strftime("%Y-%m-%d")
                     fixture = get_fixture(hid, aid, d)
                     if fixture:
@@ -849,7 +853,7 @@ def analyze_match(home_name, away_name, date_hint=None):
             except Exception:
                 pass
     else:
-        for off in range(0, 4):
+        for off in range(0, 10):
             d = (datetime.now() + timedelta(days=off)).strftime("%Y-%m-%d")
             fixture = get_fixture(hid, aid, d)
             if fixture:
@@ -866,7 +870,7 @@ def analyze_match(home_name, away_name, date_hint=None):
 
     odds = get_odds(fid)
     if not odds[0]:
-        return None, f"未找到赔率：{hs} vs {as_}"
+        return None, f"未找到赔率：{hs} vs {as_}（可能未开盘或数据源未提供）"
 
     injuries = get_injuries(fid)
     h2h = get_h2h(hid, aid)
@@ -907,7 +911,6 @@ def analyze_match(home_name, away_name, date_hint=None):
     health, hscore = check_data_health(injuries, h2h, hr, ar, odds)
     hcn = en_to_cn(hs)
     acn = en_to_cn(as_)
-
     y_threshold = YELLOW_THRESHOLD.get(league_cn_tmp, 5)
 
     inj_list = []
