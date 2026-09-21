@@ -170,3 +170,31 @@ def en_to_cn(en_name):
         if en.lower() in el or el in en.lower():
             return cn
     return en_name
+    # ============ 伤停原因中文映射 ============
+INJURY_REASON_CN = {
+    "Hamstring Injury": "腿筋受伤", "Knee Injury": "膝伤", "Ankle Injury": "脚踝伤",
+    "Muscle Injury": "肌肉伤", "Thigh Injury": "大腿伤", "Groin Injury": "腹股沟伤",
+    "Back Injury": "背伤", "Head Injury": "头部受伤", "Calf Injury": "小腿伤",
+    "Hip Injury": "髋部伤", "Knock": "轻伤", "Concussion": "脑震荡",
+    "Foot Injury": "脚伤", "Wrist Injury": "手腕伤", "Shoulder Injury": "肩伤",
+    "Broken Leg": "腿骨折", "Broken Arm": "手臂骨折", "Fracture": "骨折",
+    "Suspended": "停赛", "Yellow Cards": "累积黄牌停赛", "Red Card": "红牌停赛",
+    "Illness": "生病", "Virus": "病毒感染", "Cold": "感冒", "Flu": "流感",
+    "COVID-19": "新冠", "Personal Reasons": "个人原因", "Rest": "轮休",
+    "Injury": "受伤", "Missing Fixture": "缺席本场",
+    "Fitness": "体能问题", "Match Fitness": "比赛状态",
+    "Torn Ligament": "韧带撕裂", "Strain": "拉伤", "Sprain": "扭伤",
+    "Surgery": "手术后恢复",
+}
+
+
+def translate_injury_reason(reason):
+    if not reason:
+        return "未知"
+    if reason in INJURY_REASON_CN:
+        return INJURY_REASON_CN[reason]
+    rl = reason.lower()
+    for en, cn in INJURY_REASON_CN.items():
+        if en.lower() in rl:
+            return cn
+    return reason
