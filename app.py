@@ -45,6 +45,7 @@ SUPPORTED_LEAGUES = ["英超", "西甲", "德甲", "意甲", "法甲",
     "荷甲", "葡超", "比甲", "苏超", "挪超", "瑞超", "丹超", "芬超"]
 
 
+# ============ 数据库 ============
 def get_db_engine():
     if not db_url or not db_url.startswith("postgresql"):
         return None
@@ -239,6 +240,7 @@ def load_model_from_db():
         return None
 
 
+# ============ 模型训练 ============
 def download_league_csv(league_cn, seasons=TRAINING_SEASONS):
     code = LEAGUE_CODE_MAP.get(league_cn)
     if not code: return None
@@ -362,6 +364,7 @@ def predict_with_model(model_tuple, odds):
     return lr.predict_proba(scaler.transform(features))[0], xgb.predict_proba(features)[0]
 
 
+# ============ 工具 ============
 def current_season():
     now = datetime.now()
     return now.year if now.month >= 7 else now.year - 1
@@ -404,36 +407,22 @@ def get_params_for_league(params, league_cn):
     return params["default"]
 
 
-# Session State 初始化（集中管理，避免 Streamlit 报错）
-def init_session_state():
-    if "params" not in st.session_state:
-        st.session_state["params"] = get_default_params()
-    else:
-        if not isinstance(st.session_state["params"], dict) or "by_league" not in st.session_state["params"]:
-            st.session_state["params"] = get_default_params()
-    if "param_versions" not in st.session_state:
-        st.session_state["param_versions"] = []
-    if "cache_time" not in st.session_state:
-        st.session_state["cache_time"] = None
-    if "model_loaded" not in st.session_state:
-        st.session_state["model_loaded"] = False
-        st.session_state["model_tuple"] = None
-        st.session_state["model_meta"] = None
-        try:
-            loaded = load_model_from_db()
-            if loaded:
-                st.session_state["model_tuple"] = loaded["model"]
-                st.session_state["model_meta"] = {
-                    "trained_at": loaded["trained_at"],
-                    "samples": loaded["samples"],
-                    "lr_logloss": loaded["lr_logloss"],
-                    "xgb_logloss": loaded["xgb_logloss"]}
-                st.session_state["model_loaded"] = True
-        except Exception:
-            pass
+# ============ Session State（不调用 pickle，避免竞态） ============
+if "params" not in st.session_state:
+    st.session_state["params"] = get_default_params()
+elif not isinstance(st.session_state.get("params"), dict) or "by_league" not in st.session_state["params"]:
+    st.session_state["params"] = get_default_params()
 
-
-init_session_state()
+if "param_versions" not in st.session_state:
+    st.session_state["param_versions"] = []
+if "cache_time" not in st.session_state:
+    st.session_state["cache_time"] = None
+if "model_loaded" not in st.session_state:
+    st.session_state["model_loaded"] = False
+    st.session_state["model_tuple"] = None
+    st.session_state["model_meta"] = None
+if "model_checked" not in st.session_state:
+    st.session_state["model_checked"] = False
 
 
 POSITION_CN = {"Goalkeeper": "门将", "Defender": "后卫", "Midfielder": "中场",
@@ -501,6 +490,7 @@ def parse_match(m):
     return " ".join(parts[:mid]), " ".join(parts[mid:])
 
 
+# ============ API ============
 @st.cache_data(ttl=3600)
 def search_fixtures_by_date(date_str):
     try:
@@ -516,51 +506,38 @@ def search_team(name):
     en_name = cn_to_en(name)
     candidates = [en_name]
     cleaned = en_name.replace("/", " ").replace("-", " ").replace(".", "").replace("  ", " ").strip()
-    if cleaned != en_name:
-        candidates.append(cleaned)
+    if cleaned != en_name: candidates.append(cleaned)
     accents = {"ø": "o", "å": "a", "æ": "ae", "ö": "o", "ä": "a", "ü": "u",
-               "é": "e", "è": "e", "í": "i", "ó": "o", "á": "a", "ñ": "n", "ç": "c"}
+        "é": "e", "è": "e", "í": "i", "ó": "o", "á": "a", "ñ": "n", "ç": "c"}
     deacc = "".join(accents.get(c.lower(), c) for c in en_name)
-    if deacc != en_name:
-        candidates.append(deacc)
+    if deacc != en_name: candidates.append(deacc)
     if " " in en_name or "/" in en_name:
-        first_word = en_name.replace("/", " ").split()[0]
-        if first_word not in candidates:
-            candidates.append(first_word)
-    deacc_cleaned = deacc.replace("/", " ").replace("-", " ").replace(".", "").strip()
-    if deacc_cleaned not in candidates:
-        candidates.append(deacc_cleaned)
+        fw = en_name.replace("/", " ").split()[0]
+        if fw not in candidates: candidates.append(fw)
+    dc = deacc.replace("/", " ").replace("-", " ").replace(".", "").strip()
+    if dc not in candidates: candidates.append(dc)
 
-    exclude_patterns = [
-        r'\bwomen\b', r'\bfeminine\b', r'\bladies\b', r'\bfemale\b',
+    exclude_patterns = [r'\bwomen\b', r'\bfeminine\b', r'\bladies\b', r'\bfemale\b',
         r'\bu-?19\b', r'\bu-?21\b', r'\bu-?23\b', r'\byouth\b',
         r'\bacademy\b', r'\breserves\b', r'\(w\)', r'\bwfc\b',
-        r'\sw\s', r'\sw$', r'^w\s'
-    ]
+        r'\sw\s', r'\sw$', r'^w\s']
 
     for cand in candidates:
         try:
-            r = requests.get(f"{BASE_URL}/teams", headers=HEADERS,
-                             params={"search": cand}, timeout=10)
+            r = requests.get(f"{BASE_URL}/teams", headers=HEADERS, params={"search": cand}, timeout=10)
             data = r.json()
-            if not data.get("response"):
-                continue
+            if not data.get("response"): continue
             cl = cand.lower()
             best, bs = None, -1
             for item in data["response"]:
                 t = item["team"]
-                tn = (t.get("name") or "")
-                tnl = tn.lower()
-                if any(re.search(pat, " " + tnl + " ") for pat in exclude_patterns):
-                    continue
-                score = 1000 if tnl == cl else (
-                    100 + len(cl) if tnl.startswith(cl) else (
-                        50 * len(cl) / max(len(tnl), 1) if cl in tnl else (
-                            40 * len(tnl) / max(len(cl), 1) if tnl in cl else 0)))
-                if score > bs:
-                    bs, best = score, t
-            if best:
-                return best["id"], best["name"]
+                tnl = (t.get("name") or "").lower()
+                if any(re.search(pat, " " + tnl + " ") for pat in exclude_patterns): continue
+                score = 1000 if tnl == cl else (100 + len(cl) if tnl.startswith(cl) else (
+                    50 * len(cl) / max(len(tnl), 1) if cl in tnl else (
+                    40 * len(tnl) / max(len(cl), 1) if tnl in cl else 0)))
+                if score > bs: bs, best = score, t
+            if best: return best["id"], best["name"]
         except Exception:
             continue
     return None, None
@@ -713,6 +690,7 @@ def get_standings(league_id, season=None):
     return []
 
 
+# ============ 系数计算 ============
 def calc_injury_coef(injuries, home_id, away_id):
     pos_w = {"Goalkeeper": 1.2, "Defender": 1.1, "Midfielder": 1.0, "Attacker": 1.1}
     hs, as_ = 0, 0
@@ -770,11 +748,11 @@ def softmax3(base, adjust):
 def calc_all_probs(odds, coefs, league_id, params, league_name="",
                    schedule_coef=0.0, travel_coef=0.0, eu_pressure=0.0):
     _, _, league_cn, _ = get_league_info(league_id, league_name)
-    league_params = get_params_for_league(params, league_cn)
-    weights = league_params["weights"]
-    ew = league_params.get("extended_weights", {"schedule": 0.5, "travel": 0.3, "eu_pressure": 0.5})
-    mf = league_params["model_fusion"]
-    override = league_params.get("market_fusion_override")
+    lp = get_params_for_league(params, league_cn)
+    weights = lp["weights"]
+    ew = lp.get("extended_weights", {"schedule": 0.5, "travel": 0.3, "eu_pressure": 0.5})
+    mf = lp["model_fusion"]
+    override = lp.get("market_fusion_override")
     market_p = np.array(devig(odds))
     base_adjust = sum(coefs.get(k, 0) * weights[k] for k in weights)
     ext_adjust = (schedule_coef * ew.get("schedule", 0.5) + travel_coef * ew.get("travel", 0.3) +
@@ -1236,6 +1214,22 @@ with tab1:
             st.warning("⚠️ 今日无符合条件的二串一推荐")
 
 with tab2:
+    # 首次进入此 tab 时从数据库加载模型（延迟加载，避免启动时竞态）
+    if not st.session_state.get("model_checked", False):
+        st.session_state["model_checked"] = True
+        try:
+            loaded = load_model_from_db()
+            if loaded:
+                st.session_state["model_tuple"] = loaded["model"]
+                st.session_state["model_meta"] = {
+                    "trained_at": loaded["trained_at"],
+                    "samples": loaded["samples"],
+                    "lr_logloss": loaded["lr_logloss"],
+                    "xgb_logloss": loaded["xgb_logloss"]}
+                st.session_state["model_loaded"] = True
+        except Exception:
+            pass
+
     st.subheader("🤖 模型训练")
     if st.session_state.get("model_loaded") and st.session_state.get("model_meta"):
         meta = st.session_state["model_meta"]
