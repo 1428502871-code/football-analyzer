@@ -4,6 +4,7 @@ import pandas as pd
 import os
 import requests
 import numpy as np
+import copy
 from datetime import datetime, timedelta
 
 from teams_cn import CN_TEAM_MAP, EN_TO_CN, cn_to_en, en_to_cn
@@ -21,7 +22,22 @@ def current_season():
     return now.year if now.month >= 7 else now.year - 1
 
 
-WEIGHTS = {"injury": 0.20, "home_away": 0.20, "h2h": 0.18, "form": 0.21, "motivation": 0.21}
+def get_default_params():
+    return {
+        "weights": {"injury": 0.20, "home_away": 0.20, "h2h": 0.18, "form": 0.21, "motivation": 0.21},
+        "model_fusion": {"lr": 0.45, "xgb": 0.55},
+        "market_fusion_override": None,  # None=用联赛默认；填数字=全局覆盖
+    }
+
+
+# session_state 初始化
+if "params" not in st.session_state:
+    st.session_state["params"] = get_default_params()
+if "param_versions" not in st.session_state:
+    st.session_state["param_versions"] = []
+if "cache_time" not in st.session_state:
+    st.session_state["cache_time"] = None
+
 
 INJURY_REASON_CN = {
     "Hamstring Injury": "腿筋受伤", "Knee Injury": "膝伤", "Ankle Injury": "脚踝伤",
@@ -174,7 +190,6 @@ def search_fixtures_by_date(date_str):
 @st.cache_data(ttl=3600)
 def search_team(name):
     en_name = cn_to_en(name)
-
     candidates = [en_name]
 
     cleaned = en_name.replace("/", " ").replace("-", " ").replace(".", "").replace("  ", " ").strip()
@@ -203,8 +218,6 @@ def search_team(name):
             data = r.json()
             if not data.get("response"):
                 continue
-
-            # ★ 核心改动：多个结果时选名字最匹配的，而不是取第一个
             cand_lower = cand.lower()
             best = None
             best_score = -1
@@ -223,12 +236,10 @@ def search_team(name):
                 if score > best_score:
                     best_score = score
                     best = t
-
             if best:
                 return best["id"], best["name"]
         except Exception:
             continue
-
     return None, None
 
 
@@ -392,7 +403,7 @@ def calc_form_diff(home_recent, away_recent, home_id, away_id):
     return round(np.tanh((h - a) / 9.0), 2)
 
 
-# ============ 概率计算 ============
+# ============ 概率计算（支持自定义 params） ============
 def devig(odds):
     inv = [1 / o for o in odds]
     s = sum(inv)
@@ -405,13 +416,26 @@ def softmax3(base, adjust):
     return e / e.sum()
 
 
-def calc_all_probs(odds, coefs, league_id, league_name=""):
+def calc_all_probs(odds, coefs, league_id, params, league_name=""):
+    """用给定的 params 计算五层概率"""
+    weights = params["weights"]
+    model_fusion = params["model_fusion"]
+    override = params.get("market_fusion_override")
+
     market_p = devig(odds)
-    adjust = sum(coefs[k] * WEIGHTS[k] for k in WEIGHTS)
+    adjust = sum(coefs[k] * weights[k] for k in weights)
+
     lr_p = softmax3(market_p, adjust * 0.5)
     xgb_p = softmax3(market_p, adjust * 1.0)
-    model_p = 0.45 * lr_p + 0.55 * xgb_p
-    model_w, market_w, cn_name, cat = get_league_info(league_id, league_name)
+    model_p = model_fusion["lr"] * lr_p + model_fusion["xgb"] * xgb_p
+
+    if override is not None:
+        model_w = override
+        market_w = 1 - override
+        _, _, cn_name, _ = get_league_info(league_id, league_name)
+    else:
+        model_w, market_w, cn_name, _ = get_league_info(league_id, league_name)
+
     final_p = model_w * model_p + market_w * np.array(market_p)
     final_p = final_p / final_p.sum()
     return {
@@ -444,7 +468,7 @@ def check_data_health(injuries, h2h, h_recent, a_recent, odds):
     return checks, round(score)
 
 
-# ============ 分析单场（支持指定日期） ============
+# ============ 分析单场（返回原始数据，不算最终概率） ============
 def analyze_match(home_name, away_name, date_hint=None):
     home_id, home_std = search_team(home_name)
     away_id, away_std = search_team(away_name)
@@ -494,7 +518,6 @@ def analyze_match(home_name, away_name, date_hint=None):
     coefs = {"injury": inj_coef, "home_away": 0.3, "h2h": h2h_coef,
              "form": form_coef, "motivation": 0.0}
 
-    probs = calc_all_probs(list(odds), coefs, league_id, league_name_api)
     health, health_score = check_data_health(injuries, h2h, h_recent, a_recent, odds)
 
     home_cn = en_to_cn(home_std)
@@ -558,8 +581,8 @@ def analyze_match(home_name, away_name, date_hint=None):
     return {
         "match": f"{home_cn} vs {away_cn}",
         "league_api": league_name_api, "league_country": league_country,
-        "league_id": league_id, "league_cn": probs["league_cn"],
-        "odds": odds, "coefs": coefs, "probs": probs,
+        "league_id": league_id,
+        "odds": odds, "coefs": coefs,
         "injuries": inj_list, "h2h": h2h_list,
         "home_recent": fmt_recent(h_recent, home_id, home_cn),
         "away_recent": fmt_recent(a_recent, away_id, away_cn),
@@ -634,7 +657,16 @@ st.markdown("---")
 st.subheader("📊 手动输入或确认分析列表")
 match_input = st.text_input("自由格式，用逗号分隔（例如：阿森纳 切尔西, 皇马 巴萨）", "")
 
-if st.button("🚀 开始批量分析", type="primary"):
+col_btn1, col_btn2 = st.columns([3, 1])
+with col_btn1:
+    do_analyze = st.button("🚀 开始批量分析", type="primary")
+with col_btn2:
+    if st.button("🔄 强制刷新"):
+        st.cache_data.clear()
+        st.session_state["cache_time"] = None
+        st.success("缓存已清除，下次分析将重新抓取数据")
+
+if do_analyze:
     all_matches = []
     if match_input:
         all_matches.extend([m.strip() for m in match_input.split(",") if m.strip()])
@@ -670,18 +702,24 @@ if st.button("🚀 开始批量分析", type="primary"):
             st.error("所有比赛分析失败")
         else:
             st.session_state["results"] = results
+            st.session_state["cache_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             st.success(f"分析完成！共 {len(results)} 场")
 
-# ============ 结果展示 ============
+# ============ 结果展示（用当前 params 实时重算） ============
 if "results" in st.session_state:
+    if st.session_state.get("cache_time"):
+        st.caption(f"⏱️ 数据缓存于 {st.session_state['cache_time']}（点顶部🔄强制刷新按钮可清缓存重抓）")
+
+    params = st.session_state["params"]
+
     st.markdown("---")
     st.subheader("📋 分析结果总览")
 
     for r in st.session_state["results"]:
         with st.container(border=True):
-            p = r["probs"]
+            p = calc_all_probs(r["odds"], r["coefs"], r["league_id"], params, r["league_api"])
             st.markdown(f"### {r['match']}")
-            st.caption(f"🏆 联赛识别：**{r['league_cn']}** (API: {r['league_api']} · {r['league_country']}) "
+            st.caption(f"🏆 联赛识别：**{p['league_cn']}** (API: {r['league_api']} · {r['league_country']}) "
                        f"→ 融合比例 模型{int(p['model_w']*100)}% / 市场{int(p['market_w']*100)}%")
 
             col1, col2, col3 = st.columns(3)
@@ -730,22 +768,22 @@ if "results" in st.session_state:
 
                 st.markdown("### 💱 市场赔率（Pinnacle）")
                 st.markdown(f"主胜 **{r['odds'][0]}** / 平局 **{r['odds'][1]}** / 客胜 **{r['odds'][2]}**")
-                st.caption(f"数据抓取时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
+    # ============ 二串一推荐 ============
     st.markdown("---")
     st.subheader("🎯 今日最稳二串一推荐")
 
     candidates = []
     for r in st.session_state["results"]:
-        p = r["probs"]["final"]
-        max_idx = int(np.argmax(p))
-        max_p = p[max_idx]
+        p = calc_all_probs(r["odds"], r["coefs"], r["league_id"], params, r["league_api"])
+        p_final = p["final"]
+        max_idx = int(np.argmax(p_final))
+        max_p = p_final[max_idx]
         odd = r["odds"][max_idx]
         if max_p > 60 and 1.30 <= odd <= 2.50 and r["health_score"] >= 80:
-            market_p = r["probs"]["market"]
-            if max_p - market_p[max_idx] >= 0:
+            if max_p - p["market"][max_idx] >= 0:
                 candidates.append({
-                    "match": r["match"], "league": r["league_cn"],
+                    "match": r["match"], "league": p["league_cn"],
                     "pick": ["主胜", "平局", "客胜"][max_idx],
                     "prob": max_p, "odd": odd, "health": r["health_score"]
                 })
@@ -776,3 +814,79 @@ if "results" in st.session_state:
         st.markdown(f"**📊 理论命中率**：{hit_rate*100:.1f}%")
     else:
         st.warning("⚠️ 今日无符合条件的二串一推荐，建议观望或只玩单场。")
+
+    # ================================================================
+    # ============ 参数调优面板 ============
+    # ================================================================
+    st.markdown("---")
+    st.subheader("⚙️ 参数调优（拖动滑块，概率实时重算）")
+    st.caption("调整后下面的概率会自动变化。满意后点【💾 保存为基准】。")
+
+    with st.expander("🎛️ 展开调参面板", expanded=False):
+        params_now = copy.deepcopy(st.session_state["params"])
+
+        st.markdown("**① 五项系数权重**（合计建议 = 1.0）")
+        c1, c2 = st.columns(2)
+        with c1:
+            params_now["weights"]["injury"] = st.slider("伤停", 0.0, 0.5, params_now["weights"]["injury"], 0.01)
+            params_now["weights"]["home_away"] = st.slider("主客场", 0.0, 0.5, params_now["weights"]["home_away"], 0.01)
+            params_now["weights"]["h2h"] = st.slider("H2H", 0.0, 0.5, params_now["weights"]["h2h"], 0.01)
+        with c2:
+            params_now["weights"]["form"] = st.slider("近期状态", 0.0, 0.5, params_now["weights"]["form"], 0.01)
+            params_now["weights"]["motivation"] = st.slider("战意", 0.0, 0.5, params_now["weights"]["motivation"], 0.01)
+            total_w = sum(params_now["weights"].values())
+            if abs(total_w - 1.0) > 0.01:
+                st.warning(f"⚠️ 五项系数合计 = {total_w:.2f}（建议 = 1.00）")
+            else:
+                st.success(f"✅ 五项系数合计 = {total_w:.2f}")
+
+        st.markdown("**② 模型融合比例**（LR + XGB = 1.0）")
+        params_now["model_fusion"]["lr"] = st.slider("逻辑回归 LR", 0.0, 1.0, params_now["model_fusion"]["lr"], 0.01)
+        params_now["model_fusion"]["xgb"] = round(1 - params_now["model_fusion"]["lr"], 2)
+        st.caption(f"XGBoost 自动 = {params_now['model_fusion']['xgb']}")
+
+        st.markdown("**③ 全局模型融合覆盖**（可选）")
+        use_override = st.checkbox("启用全局覆盖（忽略联赛默认比例）", value=params_now.get("market_fusion_override") is not None)
+        if use_override:
+            override_val = st.slider("全局模型权重", 0.0, 1.0, params_now.get("market_fusion_override") or 0.55, 0.01)
+            params_now["market_fusion_override"] = override_val
+            st.caption(f"全局：模型 {override_val:.2f} / 市场 {1-override_val:.2f}")
+        else:
+            params_now["market_fusion_override"] = None
+            st.caption("按联赛默认比例（英超/德甲/意甲 65/35，法甲/西甲/普通 55/45，欧战 70/30）")
+
+        st.session_state["params"] = params_now
+
+        col_btn_a, col_btn_b, col_btn_c = st.columns(3)
+        with col_btn_a:
+            if st.button("💾 保存为基准"):
+                st.session_state["param_versions"].append({
+                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "params": copy.deepcopy(params_now),
+                })
+                st.success("已保存为新版本")
+        with col_btn_b:
+            if st.button("↩️ 恢复默认"):
+                st.session_state["params"] = get_default_params()
+                st.success("已恢复默认参数")
+                st.rerun()
+        with col_btn_c:
+            if st.button("📋 查看历史版本"):
+                st.session_state["show_versions"] = not st.session_state.get("show_versions", False)
+
+        if st.session_state.get("show_versions"):
+            versions = st.session_state["param_versions"]
+            if not versions:
+                st.caption("暂无保存的版本")
+            else:
+                for i, v in enumerate(reversed(versions)):
+                    idx = len(versions) - 1 - i
+                    with st.container(border=True):
+                        st.markdown(f"**版本 {idx+1}** · {v['time']}")
+                        st.caption(f"伤停 {v['params']['weights']['injury']} / 主客场 {v['params']['weights']['home_away']} / "
+                                   f"H2H {v['params']['weights']['h2h']} / 状态 {v['params']['weights']['form']} / "
+                                   f"战意 {v['params']['weights']['motivation']}")
+                        if st.button(f"恢复此版本", key=f"restore_{idx}"):
+                            st.session_state["params"] = copy.deepcopy(v["params"])
+                            st.success(f"已恢复版本 {idx+1}")
+                            st.rerun()
