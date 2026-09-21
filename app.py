@@ -1,9 +1,13 @@
+# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
 import os
 import requests
 import numpy as np
 from datetime import datetime, timedelta
+
+# 从独立文件导入球队映射
+from teams_cn import CN_TEAM_MAP, EN_TO_CN, cn_to_en, en_to_cn
 
 st.set_page_config(page_title="足球分析模型", layout="wide", page_icon="⚽")
 st.title("⚽ 足球分析模型 - 完整版")
@@ -12,12 +16,15 @@ api_key = os.environ.get("API_FOOTBALL_KEY", "")
 HEADERS = {"x-apisports-key": api_key}
 BASE_URL = "https://v3.football.api-sports.io"
 
+
 def current_season():
     now = datetime.now()
     return now.year if now.month >= 7 else now.year - 1
 
+
 WEIGHTS = {"injury": 0.20, "home_away": 0.20, "h2h": 0.18, "form": 0.21, "motivation": 0.21}
 
+# ============ 伤停原因中文映射 ============
 INJURY_REASON_CN = {
     "Hamstring Injury": "腿筋受伤", "Knee Injury": "膝伤", "Ankle Injury": "脚踝伤",
     "Muscle Injury": "肌肉伤", "Thigh Injury": "大腿伤", "Groin Injury": "腹股沟伤",
@@ -38,6 +45,7 @@ INJURY_REASON_CN = {
     "Surgery": "手术后恢复", "Operation": "手术后恢复",
 }
 
+
 def translate_injury_reason(reason):
     if not reason:
         return "未知"
@@ -49,15 +57,18 @@ def translate_injury_reason(reason):
             return cn
     return reason
 
+
 POSITION_CN = {
     "Goalkeeper": "门将", "Defender": "后卫", "Midfielder": "中场",
     "Attacker": "前锋", "Forward": "前锋",
 }
 
+
 def translate_position(pos):
     if not pos:
         return "未知"
     return POSITION_CN.get(pos, pos)
+
 
 PLAYER_CN_MAP = {
     "Erling Haaland": "哈兰德", "Kevin De Bruyne": "德布劳内", "Mohamed Salah": "萨拉赫",
@@ -80,14 +91,16 @@ PLAYER_CN_MAP = {
     "Alphonso Davies": "戴维斯", "Leroy Sane": "萨内",
     "Serge Gnabry": "格纳布里", "Thomas Muller": "穆勒",
     "Leon Goretzka": "格雷茨卡", "Kingsley Coman": "科曼",
-    "Lautaro Martinez": "劳塔罗", "Rafael Leao": "莱奥", "Khvicha Kvaratskhelia": "克瓦拉茨赫利亚",
-    "Victor Osimhen": "奥斯梅恩", "Federico Chiesa": "基耶萨", "Nicolo Barella": "巴雷拉",
+    "Lautaro Martinez": "劳塔罗", "Rafael Leao": "莱奥",
+    "Khvicha Kvaratskhelia": "克瓦拉茨赫利亚", "Victor Osimhen": "奥斯梅恩",
+    "Federico Chiesa": "基耶萨", "Nicolo Barella": "巴雷拉",
     "Alessandro Bastoni": "巴斯托尼", "Mike Maignan": "迈尼昂",
     "Ousmane Dembele": "登贝莱", "Achraf Hakimi": "阿什拉夫",
     "Gianluigi Donnarumma": "多纳鲁马", "Marquinhos": "马尔基尼奥斯",
     "Vitinha": "维蒂尼亚", "Bradley Barcola": "巴尔科拉",
     "Alexandre Lacazette": "拉卡泽特",
 }
+
 
 def translate_player(name):
     if not name:
@@ -96,6 +109,8 @@ def translate_player(name):
         return f"{PLAYER_CN_MAP[name]} ({name})"
     return name
 
+
+# ============ 联赛映射 ============
 LEAGUE_MAP = {
     39:  (0.65, 0.35, "英超", "顶级"), 140: (0.55, 0.45, "西甲", "顶级"),
     78:  (0.65, 0.35, "德甲", "顶级"), 135: (0.65, 0.35, "意甲", "顶级"),
@@ -109,110 +124,13 @@ LEAGUE_MAP = {
     119: (0.55, 0.45, "丹超", "普通"), 108: (0.55, 0.45, "芬超", "普通"),
 }
 
+
 def get_league_info(league_id, league_name_from_api=""):
     if league_id in LEAGUE_MAP:
         model_w, market_w, cn_name, cat = LEAGUE_MAP[league_id]
         return model_w, market_w, cn_name, cat
     return 0.55, 0.45, league_name_from_api or "未知联赛", "普通"
 
-CN_TEAM_MAP = {
-    "阿森纳": "Arsenal", "切尔西": "Chelsea", "曼城": "Man City", "曼彻斯特城": "Man City",
-    "曼联": "Man United", "曼彻斯特联": "Man United", "利物浦": "Liverpool",
-    "热刺": "Tottenham", "托特纳姆": "Tottenham", "纽卡斯尔": "Newcastle",
-    "阿斯顿维拉": "Aston Villa", "布莱顿": "Brighton", "西汉姆": "West Ham",
-    "西汉姆联": "West Ham", "埃弗顿": "Everton", "富勒姆": "Fulham",
-    "水晶宫": "Crystal Palace", "布伦特福德": "Brentford", "狼队": "Wolves",
-    "诺丁汉森林": "Nottingham Forest", "伯恩茅斯": "Bournemouth",
-    "莱斯特城": "Leicester", "南安普顿": "Southampton", "伊普斯维奇": "Ipswich",
-    "利兹联": "Leeds", "伯恩利": "Burnley", "谢菲联": "Sheffield Utd",
-    "谢菲尔德联": "Sheffield Utd", "桑德兰": "Sunderland", "米德尔斯堡": "Middlesbrough",
-    "西布朗": "West Brom", "诺维奇": "Norwich", "沃特福德": "Watford",
-    "考文垂": "Coventry", "布里斯托城": "Bristol City", "斯旺西": "Swansea",
-    "卡迪夫城": "Cardiff", "赫尔城": "Hull", "普雷斯顿": "Preston",
-    "米尔沃尔": "Millwall", "斯托克城": "Stoke", "布莱克本": "Blackburn",
-    "女王公园": "QPR", "牛津联": "Oxford Utd", "德比郡": "Derby",
-    "朴茨茅斯": "Portsmouth", "卢顿": "Luton", "普利茅斯": "Plymouth",
-    "皇马": "Real Madrid", "皇家马德里": "Real Madrid", "巴萨": "Barcelona",
-    "巴塞罗那": "Barcelona", "马竞": "Atletico Madrid", "马德里竞技": "Atletico Madrid",
-    "塞维利亚": "Sevilla", "毕尔巴鄂": "Athletic Bilbao", "皇家社会": "Real Sociedad",
-    "皇家贝蒂斯": "Real Betis", "贝蒂斯": "Real Betis", "比利亚雷亚尔": "Villarreal",
-    "瓦伦西亚": "Valencia", "赫罗纳": "Girona", "塞尔塔": "Celta Vigo",
-    "拉科鲁尼亚": "Deportivo", "莱万特": "Levante", "西班牙人": "Espanyol",
-    "赫塔菲": "Getafe", "巴列卡诺": "Rayo Vallecano", "奥萨苏纳": "Osasuna",
-    "马洛卡": "Mallorca", "拉斯帕尔马斯": "Las Palmas", "阿拉维斯": "Alaves",
-    "莱加内斯": "Leganes", "萨拉戈萨": "Zaragoza", "希洪竞技": "Sporting Gijon",
-    "马拉加": "Malaga", "桑坦德": "Racing Santander", "埃瓦尔": "Eibar",
-    "韦斯卡": "Huesca", "卡迪斯": "Cadiz", "格拉纳达": "Granada",
-    "阿尔梅里亚": "Almeria", "费罗尔": "Ferrol", "米兰德斯": "Mirandes",
-    "拜仁": "Bayern Munich", "拜仁慕尼黑": "Bayern Munich", "多特": "Dortmund",
-    "多特蒙德": "Dortmund", "莱比锡": "RB Leipzig", "勒沃库森": "Bayer Leverkusen",
-    "法兰克福": "Eintracht Frankfurt", "斯图加特": "Stuttgart",
-    "沃尔夫斯堡": "Wolfsburg", "门兴": "Monchengladbach", "不莱梅": "Werder Bremen",
-    "弗赖堡": "Freiburg", "霍芬海姆": "Hoffenheim", "美因茨": "Mainz",
-    "奥格斯堡": "Augsburg", "柏林联合": "Union Berlin", "波鸿": "Bochum",
-    "海登海姆": "Heidenheim", "圣保利": "St Pauli", "荷尔斯泰因": "Holstein Kiel",
-    "汉堡": "Hamburger SV", "帕德博恩": "SC Paderborn", "沙尔克": "Schalke",
-    "沙尔克04": "Schalke", "杜塞尔多夫": "Fortuna Dusseldorf", "汉诺威": "Hannover",
-    "凯泽斯劳滕": "Kaiserslautern", "纽伦堡": "Nurnberg", "卡尔斯鲁厄": "Karlsruher",
-    "菲尔特": "Greuther Furth", "柏林赫塔": "Hertha Berlin", "科隆": "Cologne",
-    "马格德堡": "Magdeburg", "布伦瑞克": "Braunschweig", "达姆施塔特": "Darmstadt",
-    "明斯特": "Preussen Munster", "雷根斯堡": "Regensburg", "乌尔姆": "Ulm",
-    "尤文": "Juventus", "尤文图斯": "Juventus", "国米": "Inter",
-    "国际米兰": "Inter", "AC米兰": "AC Milan", "米兰": "AC Milan",
-    "那不勒斯": "Napoli", "罗马": "Roma", "拉齐奥": "Lazio",
-    "亚特兰大": "Atalanta", "佛罗伦萨": "Fiorentina", "博洛尼亚": "Bologna",
-    "都灵": "Torino", "乌迪内斯": "Udinese", "热那亚": "Genoa",
-    "卡利亚里": "Cagliari", "莱切": "Lecce", "维罗纳": "Verona",
-    "萨索洛": "Sassuolo", "恩波利": "Empoli", "蒙扎": "Monza", "科莫": "Como",
-    "帕尔马": "Parma", "威尼斯": "Venezia",
-    "巴黎圣日耳曼": "PSG", "巴黎": "PSG", "马赛": "Marseille", "里昂": "Lyon",
-    "摩纳哥": "Monaco", "尼斯": "Nice", "里尔": "Lille", "朗斯": "Lens",
-    "雷恩": "Rennes", "斯特拉斯堡": "Strasbourg", "图卢兹": "Toulouse",
-    "南特": "Nantes", "兰斯": "Reims", "布雷斯特": "Brest",
-    "蒙彼利埃": "Montpellier", "勒阿弗尔": "Le Havre", "欧塞尔": "Auxerre",
-    "昂热": "Angers", "圣埃蒂安": "Saint-Etienne",
-    "梅斯": "Metz", "洛里昂": "Lorient", "克莱蒙": "Clermont",
-    "阿雅克肖": "Ajaccio", "巴斯蒂亚": "Bastia", "甘冈": "Guingamp",
-    "格勒诺布尔": "Grenoble", "罗德兹": "Rodez", "特鲁瓦": "Troyes",
-    "亚眠": "Amiens", "波城": "Pau", "拉瓦勒": "Laval",
-    "阿贾克斯": "Ajax", "埃因霍温": "PSV", "费耶诺德": "Feyenoord",
-    "阿尔克马尔": "AZ Alkmaar", "特温特": "Twente", "乌德勒支": "Utrecht",
-    "波尔图": "Porto", "本菲卡": "Benfica", "里斯本竞技": "Sporting CP",
-    "布拉加": "Braga", "吉马良斯": "Vitoria Guimaraes",
-    "布鲁日": "Club Brugge", "安德莱赫特": "Anderlecht", "根特": "Gent",
-    "凯尔特人": "Celtic", "流浪者": "Rangers", "阿伯丁": "Aberdeen",
-    "哈茨": "Hearts", "希伯尼安": "Hibernian",
-    "罗森博格": "Rosenborg", "莫尔德": "Molde", "博多闪耀": "Bodo Glimt",
-    "布兰": "Brann", "维京": "Viking", "利勒斯特罗姆": "Lillestrom",
-    "马尔默": "Malmo", "佐加顿斯": "Djurgarden", "哈马比": "Hammarby",
-    "哥德堡": "Goteborg", "索尔纳": "AIK",
-    "哥本哈根": "Copenhagen", "北西兰": "Nordsjaelland", "中日德兰": "Midtjylland",
-    "布隆德比": "Brondby", "奥尔堡": "Aalborg",
-    "赫尔辛基": "HJK Helsinki", "库奥皮奥": "KuPS",
-    "加拉塔萨雷": "Galatasaray", "费内巴切": "Fenerbahce", "贝西克塔斯": "Besiktas",
-    "顿涅茨克矿工": "Shakhtar", "基辅迪纳摩": "Dynamo Kyiv", "萨尔茨堡": "Salzburg",
-    "年轻人": "Young Boys", "巴塞尔": "Basel", "红星": "Red Star Belgrade",
-    "布拉格斯拉维亚": "Slavia Prague", "布拉格斯巴达": "Sparta Prague",
-}
-
-EN_TO_CN = {}
-for cn, en in CN_TEAM_MAP.items():
-    if en not in EN_TO_CN:
-        EN_TO_CN[en] = cn
-
-def cn_to_en(name):
-    return CN_TEAM_MAP.get(name.strip(), name.strip())
-
-def en_to_cn(en_name):
-    if not en_name: return en_name
-    en_name = en_name.strip()
-    if en_name in EN_TO_CN: return EN_TO_CN[en_name]
-    el = en_name.lower()
-    for en, cn in EN_TO_CN.items():
-        if en.lower() == el: return cn
-    for en, cn in EN_TO_CN.items():
-        if en.lower() in el or el in en.lower(): return cn
-    return en_name
 
 def parse_match(m):
     m = m.replace("vs", " ").replace("VS", " ").replace("对", " ").strip()
@@ -223,7 +141,8 @@ def parse_match(m):
         start = 0
         while True:
             idx = m.find(cn, start)
-            if idx == -1: break
+            if idx == -1:
+                break
             end = idx + len(cn)
             overlap = any(not (end <= s or idx >= e) for s, e in used_ranges)
             if not overlap:
@@ -243,6 +162,8 @@ def parse_match(m):
     mid = len(parts) // 2
     return " ".join(parts[:mid]), " ".join(parts[mid:])
 
+
+# ============ API 调用 ============
 @st.cache_data(ttl=3600)
 def search_fixtures_by_date(date_str):
     try:
@@ -252,17 +173,50 @@ def search_fixtures_by_date(date_str):
     except Exception:
         return []
 
+
 @st.cache_data(ttl=3600)
 def search_team(name):
-    try:
-        r = requests.get(f"{BASE_URL}/teams", headers=HEADERS, params={"search": cn_to_en(name)}, timeout=10)
-        data = r.json()
-        if data.get("response"):
-            t = data["response"][0]["team"]
-            return t["id"], t["name"]
-    except Exception:
-        pass
+    """多轮降级搜索，解决特殊字符、未收录球队问题"""
+    en_name = cn_to_en(name)
+
+    candidates = [en_name]
+
+    # 候选2：去特殊字符
+    cleaned = en_name.replace("/", " ").replace("-", " ").replace(".", "").replace("  ", " ").strip()
+    if cleaned != en_name:
+        candidates.append(cleaned)
+
+    # 候选3：去重音符号
+    accents = {"ø": "o", "å": "a", "æ": "ae", "ö": "o", "ä": "a", "ü": "u",
+               "é": "e", "è": "e", "í": "i", "ó": "o", "á": "a", "ñ": "n", "ç": "c"}
+    deacc = "".join(accents.get(c.lower(), c) for c in en_name)
+    if deacc != en_name:
+        candidates.append(deacc)
+
+    # 候选4：取第一个词
+    if " " in en_name or "/" in en_name:
+        first_word = en_name.replace("/", " ").split()[0]
+        if first_word not in candidates:
+            candidates.append(first_word)
+
+    # 候选5：去重音后再去特殊字符
+    deacc_cleaned = deacc.replace("/", " ").replace("-", " ").replace(".", "").strip()
+    if deacc_cleaned not in candidates:
+        candidates.append(deacc_cleaned)
+
+    for cand in candidates:
+        try:
+            r = requests.get(f"{BASE_URL}/teams", headers=HEADERS,
+                             params={"search": cand}, timeout=10)
+            data = r.json()
+            if data.get("response"):
+                t = data["response"][0]["team"]
+                return t["id"], t["name"]
+        except Exception:
+            continue
+
     return None, None
+
 
 @st.cache_data(ttl=3600)
 def get_fixture(home_id, away_id, date_str):
@@ -275,6 +229,7 @@ def get_fixture(home_id, away_id, date_str):
     except Exception:
         pass
     return None
+
 
 @st.cache_data(ttl=3600)
 def get_odds(fixture_id):
@@ -296,6 +251,7 @@ def get_odds(fixture_id):
         pass
     return None, None, None
 
+
 @st.cache_data(ttl=3600)
 def get_injuries(fixture_id):
     try:
@@ -304,6 +260,7 @@ def get_injuries(fixture_id):
         return r.json().get("response", [])
     except Exception:
         return []
+
 
 @st.cache_data(ttl=86400)
 def get_sidelined(player_id):
@@ -319,6 +276,7 @@ def get_sidelined(player_id):
     except Exception:
         pass
     return "未知", "未知"
+
 
 @st.cache_data(ttl=86400)
 def get_player_stats(player_id):
@@ -340,6 +298,7 @@ def get_player_stats(player_id):
         pass
     return {"position": "", "minutes": 0, "appearences": 0}
 
+
 def classify_role(minutes, appearances):
     if not appearances or appearances < 3 or minutes < 100:
         return "未知"
@@ -350,6 +309,7 @@ def classify_role(minutes, appearances):
     else:
         return "替补"
 
+
 @st.cache_data(ttl=3600)
 def get_h2h(home_id, away_id):
     try:
@@ -358,6 +318,7 @@ def get_h2h(home_id, away_id):
         return r.json().get("response", [])
     except Exception:
         return []
+
 
 @st.cache_data(ttl=3600)
 def get_recent_form(team_id, last=6):
@@ -368,6 +329,8 @@ def get_recent_form(team_id, last=6):
     except Exception:
         return []
 
+
+# ============ 五项系数计算 ============
 def calc_injury_coef(injuries, home_id, away_id):
     pos_w = {"Goalkeeper": 1.2, "Defender": 1.1, "Midfielder": 1.0, "Attacker": 1.1}
     h_score, a_score = 0, 0
@@ -375,10 +338,13 @@ def calc_injury_coef(injuries, home_id, away_id):
         t_id = inj["team"]["id"]
         pos = inj["player"].get("position", "Midfielder")
         w = pos_w.get(pos, 1.0)
-        if t_id == home_id: h_score += w
-        elif t_id == away_id: a_score += w
+        if t_id == home_id:
+            h_score += w
+        elif t_id == away_id:
+            a_score += w
     diff = a_score - h_score
     return round(np.tanh(diff / 3.0), 2), h_score, a_score
+
 
 def calc_h2h_coef(h2h_matches, home_id):
     decay = [1.0, 0.7, 0.5, 0.3, 0.2]
@@ -393,6 +359,7 @@ def calc_h2h_coef(h2h_matches, home_id):
             score += w * (1 if a_s > h_s else (-1 if a_s < h_s else 0))
     return round(np.tanh(score / 3.0), 2)
 
+
 def calc_form_coef(recent, team_id):
     score = 0
     for m in recent:
@@ -404,20 +371,25 @@ def calc_form_coef(recent, team_id):
             score += (3 if a_s > h_s else (1 if a_s == h_s else 0))
     return score
 
+
 def calc_form_diff(home_recent, away_recent, home_id, away_id):
     h = calc_form_coef(home_recent, home_id)
     a = calc_form_coef(away_recent, away_id)
     return round(np.tanh((h - a) / 9.0), 2)
 
+
+# ============ 概率计算 ============
 def devig(odds):
-    inv = [1/o for o in odds]
+    inv = [1 / o for o in odds]
     s = sum(inv)
-    return [i/s for i in inv]
+    return [i / s for i in inv]
+
 
 def softmax3(base, adjust):
-    logits = np.array([np.log(p) for p in base]) + np.array([adjust, -adjust*0.3, -adjust*0.7])
+    logits = np.array([np.log(p) for p in base]) + np.array([adjust, -adjust * 0.3, -adjust * 0.7])
     e = np.exp(logits - np.max(logits))
     return e / e.sum()
+
 
 def calc_all_probs(odds, coefs, league_id, league_name=""):
     market_p = devig(odds)
@@ -434,6 +406,7 @@ def calc_all_probs(odds, coefs, league_id, league_name=""):
         "final": (final_p * 100).round(1),
         "league_cn": cn_name, "model_w": model_w, "market_w": market_w
     }
+
 
 def check_data_health(injuries, h2h, h_recent, a_recent, odds):
     checks = []
@@ -456,45 +429,49 @@ def check_data_health(injuries, h2h, h_recent, a_recent, odds):
     score = sum(1 for c in checks if c[0] == "✅") / len(checks) * 100
     return checks, round(score)
 
+
+# ============ 分析单场 ============
 def analyze_match(home_name, away_name):
     home_id, home_std = search_team(home_name)
     away_id, away_std = search_team(away_name)
     if not home_id or not away_id:
         return None, f"球队搜索失败：{home_name} / {away_name}（可尝试补充到映射表）"
-    
+
     fixture = None
     for offset in range(0, 4):
         d = (datetime.now() + timedelta(days=offset)).strftime("%Y-%m-%d")
         fixture = get_fixture(home_id, away_id, d)
-        if fixture: break
+        if fixture:
+            break
     if not fixture:
         return None, f"未找到近期比赛：{home_std} vs {away_std}"
-    
+
     fid = fixture["fixture"]["id"]
     league_id = fixture["league"]["id"]
     league_name_api = fixture["league"]["name"]
     league_country = fixture["league"].get("country", "")
-    
+
     odds = get_odds(fid)
     if not odds[0]:
         return None, f"未找到赔率：{home_std} vs {away_std}"
-    
+
     injuries = get_injuries(fid)
     h2h = get_h2h(home_id, away_id)
     h_recent = get_recent_form(home_id)
     a_recent = get_recent_form(away_id)
-    
+
     inj_coef, h_inj_score, a_inj_score = calc_injury_coef(injuries, home_id, away_id)
     h2h_coef = calc_h2h_coef(h2h, home_id)
     form_coef = calc_form_diff(h_recent, a_recent, home_id, away_id)
-    coefs = {"injury": inj_coef, "home_away": 0.3, "h2h": h2h_coef, "form": form_coef, "motivation": 0.0}
-    
+    coefs = {"injury": inj_coef, "home_away": 0.3, "h2h": h2h_coef,
+             "form": form_coef, "motivation": 0.0}
+
     probs = calc_all_probs(list(odds), coefs, league_id, league_name_api)
     health, health_score = check_data_health(injuries, h2h, h_recent, a_recent, odds)
-    
+
     home_cn = en_to_cn(home_std)
     away_cn = en_to_cn(away_std)
-    
+
     inj_list = []
     for inj in injuries:
         t_id = inj["team"]["id"]
@@ -503,7 +480,7 @@ def analyze_match(home_name, away_name):
         player_name = inj["player"].get("name", "")
         raw_reason = inj["player"].get("reason", inj.get("type", ""))
         reason_cn = translate_injury_reason(raw_reason)
-        
+
         raw_pos = inj["player"].get("position", "") or ""
         stats = get_player_stats(player_id) if player_id else {"position": "", "minutes": 0, "appearences": 0}
         if not raw_pos and stats["position"]:
@@ -511,7 +488,7 @@ def analyze_match(home_name, away_name):
         pos_cn = translate_position(raw_pos)
         role = classify_role(stats["minutes"], stats["appearences"])
         start_date, end_date = get_sidelined(player_id) if player_id else ("未知", "未知")
-        
+
         inj_list.append({
             "球队": team_cn,
             "球员": translate_player(player_name),
@@ -521,7 +498,7 @@ def analyze_match(home_name, away_name):
             "起始日期": start_date,
             "预计复出": end_date,
         })
-    
+
     h2h_list = []
     for m in h2h[:5]:
         h_cn = en_to_cn(m["teams"]["home"]["name"])
@@ -532,7 +509,7 @@ def analyze_match(home_name, away_name):
             "比分": f"{m['goals']['home']}-{m['goals']['away']}",
             "客队": a_cn,
         })
-    
+
     def fmt_recent(recent, team_id, team_cn):
         rows = []
         for m in recent:
@@ -542,12 +519,14 @@ def analyze_match(home_name, away_name):
             a_s = m["goals"]["away"] or 0
             if m["teams"]["home"]["id"] == team_id:
                 result = "胜" if h_s > a_s else ("平" if h_s == a_s else "负")
-                rows.append({"日期": m["fixture"]["date"][:10], "对手": a_cn, "比分": f"{h_s}-{a_s}", "结果": result})
+                rows.append({"日期": m["fixture"]["date"][:10], "对手": a_cn,
+                             "比分": f"{h_s}-{a_s}", "结果": result})
             else:
                 result = "胜" if a_s > h_s else ("平" if a_s == h_s else "负")
-                rows.append({"日期": m["fixture"]["date"][:10], "对手": h_cn, "比分": f"{a_s}-{h_s}", "结果": result})
+                rows.append({"日期": m["fixture"]["date"][:10], "对手": h_cn,
+                             "比分": f"{a_s}-{h_s}", "结果": result})
         return rows
-    
+
     return {
         "match": f"{home_cn} vs {away_cn}",
         "league_api": league_name_api, "league_country": league_country,
@@ -560,6 +539,10 @@ def analyze_match(home_name, away_name):
         "home_cn": home_cn, "away_cn": away_cn,
     }, None
 
+
+# ================================================================
+# ============ 界面 ============
+# ================================================================
 st.subheader("📅 按日期搜索当日比赛")
 st.caption("搜索指定日期、系统支持的所有联赛比赛，勾选后加入分析列表。")
 
@@ -592,7 +575,7 @@ if "date_fixtures" in st.session_state:
             opt = f"[{league_cn}] {home_cn} vs {away_cn} ({time_str})"
             options.append(opt)
             opt_to_match[opt] = f"{home_cn} {away_cn}"
-        
+
         selected = st.multiselect("勾选要分析的比赛", options)
         col_c, col_d = st.columns(2)
         with col_c:
@@ -611,7 +594,7 @@ if "date_fixtures" in st.session_state:
             if st.button("🗑️ 清空已加入"):
                 st.session_state["selected_matches"] = []
                 st.rerun()
-        
+
         if st.session_state.get("selected_matches"):
             st.info(f"📋 当前待分析列表：{len(st.session_state['selected_matches'])} 场")
             with st.expander("查看已加入的比赛"):
@@ -629,7 +612,7 @@ if st.button("🚀 开始批量分析", type="primary"):
     if st.session_state.get("selected_matches"):
         all_matches.extend(st.session_state["selected_matches"])
     all_matches = list(dict.fromkeys(all_matches))
-    
+
     if not all_matches:
         st.warning("请手动输入比赛，或从日期搜索结果中勾选添加")
     elif not api_key:
@@ -644,74 +627,81 @@ if st.button("🚀 开始批量分析", type="primary"):
                 st.warning(f"无法解析：{m}")
                 continue
             r, err = analyze_match(home, away)
-            if err: st.warning(err)
-            else: results.append(r)
+            if err:
+                st.warning(err)
+            else:
+                results.append(r)
         progress.empty()
-        
+
         if not results:
             st.error("所有比赛分析失败")
         else:
             st.session_state["results"] = results
             st.success(f"分析完成！共 {len(results)} 场")
 
+# ============ 结果展示 ============
 if "results" in st.session_state:
     st.markdown("---")
     st.subheader("📋 分析结果总览")
-    
+
     for r in st.session_state["results"]:
         with st.container(border=True):
             p = r["probs"]
             st.markdown(f"### {r['match']}")
-            st.caption(f"🏆 联赛识别：**{r['league_cn']}** (API: {r['league_api']} · {r['league_country']}) → 融合比例 模型{int(p['model_w']*100)}% / 市场{int(p['market_w']*100)}%")
-            
+            st.caption(f"🏆 联赛识别：**{r['league_cn']}** (API: {r['league_api']} · {r['league_country']}) "
+                       f"→ 融合比例 模型{int(p['model_w']*100)}% / 市场{int(p['market_w']*100)}%")
+
             col1, col2, col3 = st.columns(3)
             col1.metric("主胜", f"{p['final'][0]}%")
             col2.metric("平局", f"{p['final'][1]}%")
             col3.metric("客胜", f"{p['final'][2]}%")
-            
+
             with st.expander("🔍 数据依据详情"):
                 st.markdown(f"### 🩺 本场数据健康度：{r['health_score']}%")
                 for icon, name, detail in r["health"]:
                     st.markdown(f"- {icon} **{name}**：{detail}")
-                
+
                 st.markdown("### 🩺 伤停明细")
                 if r["injuries"]:
                     st.dataframe(pd.DataFrame(r["injuries"]), hide_index=True)
                 else:
                     st.caption("⚠️ 无伤停记录")
-                st.caption("数据源：API-Football（角色按出场分钟判断：主力≥1500分钟，轮换≥600分钟，替补<600分钟）")
-                
+                st.caption("数据源：API-Football（角色按出场分钟判断：主力≥1500，轮换≥600，替补<600）")
+
                 st.markdown("### 📊 五层概率对比")
                 st.dataframe(pd.DataFrame({
                     "层级": ["逻辑回归", "XGBoost", "模型融合", "市场去水", "最终融合"],
-                    "主胜": [f"{p['lr'][0]}%", f"{p['xgb'][0]}%", f"{p['model'][0]}%", f"{p['market'][0]}%", f"**{p['final'][0]}%**"],
-                    "平局": [f"{p['lr'][1]}%", f"{p['xgb'][1]}%", f"{p['model'][1]}%", f"{p['market'][1]}%", f"**{p['final'][1]}%**"],
-                    "客胜": [f"{p['lr'][2]}%", f"{p['xgb'][2]}%", f"{p['model'][2]}%", f"{p['market'][2]}%", f"**{p['final'][2]}%**"],
+                    "主胜": [f"{p['lr'][0]}%", f"{p['xgb'][0]}%", f"{p['model'][0]}%",
+                             f"{p['market'][0]}%", f"**{p['final'][0]}%**"],
+                    "平局": [f"{p['lr'][1]}%", f"{p['xgb'][1]}%", f"{p['model'][1]}%",
+                             f"{p['market'][1]}%", f"**{p['final'][1]}%**"],
+                    "客胜": [f"{p['lr'][2]}%", f"{p['xgb'][2]}%", f"{p['model'][2]}%",
+                             f"{p['market'][2]}%", f"**{p['final'][2]}%**"],
                 }), hide_index=True)
-                
+
                 st.markdown("### 🎛️ 五项系数")
                 st.json(r["coefs"])
-                
+
                 st.markdown(f"### 📈 近期战绩 - {r['home_cn']}")
                 if r["home_recent"]:
                     st.dataframe(pd.DataFrame(r["home_recent"]), hide_index=True)
                 st.markdown(f"### 📈 近期战绩 - {r['away_cn']}")
                 if r["away_recent"]:
                     st.dataframe(pd.DataFrame(r["away_recent"]), hide_index=True)
-                
+
                 st.markdown("### ⚔️ 历史交战 (近5次)")
                 if r["h2h"]:
                     st.dataframe(pd.DataFrame(r["h2h"]), hide_index=True)
                 else:
                     st.caption("⚠️ 无H2H记录")
-                
+
                 st.markdown("### 💱 市场赔率（Pinnacle）")
                 st.markdown(f"主胜 **{r['odds'][0]}** / 平局 **{r['odds'][1]}** / 客胜 **{r['odds'][2]}**")
                 st.caption(f"数据抓取时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     st.markdown("---")
     st.subheader("🎯 今日最稳二串一推荐")
-    
+
     candidates = []
     for r in st.session_state["results"]:
         p = r["probs"]["final"]
@@ -726,7 +716,7 @@ if "results" in st.session_state:
                     "pick": ["主胜", "平局", "客胜"][max_idx],
                     "prob": max_p, "odd": odd, "health": r["health_score"]
                 })
-    
+
     best_combo = None
     best_score = 0
     for i in range(len(candidates)):
@@ -738,7 +728,7 @@ if "results" in st.session_state:
                 if hit_rate > best_score:
                     best_score = hit_rate
                     best_combo = (c1, c2, total_odd, hit_rate)
-    
+
     if best_combo:
         c1, c2, total_odd, hit_rate = best_combo
         st.success(f"✅ 找到最稳组合！理论命中率：{hit_rate*100:.1f}%")
