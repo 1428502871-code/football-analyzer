@@ -158,6 +158,102 @@ def auto_update_results():
     return updated
 
 
+# ============ 概率校准 ============
+def calc_calibration():
+    history = load_history(1000)
+    finished = [h for h in history if h.get("actual_result")]
+    if len(finished) < 10:
+        return None
+    bins_home = [[] for _ in range(10)]
+    for h in finished:
+        try:
+            pj = json.loads(h.get("probs_json") or "{}")
+            fin = pj.get("final", [])
+            if not isinstance(fin, list) or len(fin) != 3:
+                continue
+            p_home = float(fin[0])
+            actual = h["actual_result"]
+            bin_idx = min(int(p_home // 10), 9)
+            bins_home[bin_idx].append((p_home, actual == "主胜"))
+        except Exception:
+            continue
+    rows = []
+    for i in range(10):
+        samples = bins_home[i]
+        if len(samples) < 3:
+            continue
+        avg_pred = sum(s[0] for s in samples) / len(samples)
+        actual_rate = sum(1 for s in samples if s[1]) / len(samples) * 100
+        rows.append({
+            "概率区间": f"{i*10}-{(i+1)*10}%",
+            "样本数": len(samples),
+            "预测均值": round(avg_pred, 1),
+            "实际主胜率": round(actual_rate, 1),
+            "偏差": round(actual_rate - avg_pred, 1),
+        })
+    return rows
+
+
+def calc_overall_logloss():
+    history = load_history(1000)
+    finished = [h for h in history if h.get("actual_result")]
+    if not finished:
+        return None
+    result_map = {"主胜": 0, "平局": 1, "客胜": 2}
+    losses = []
+    for h in finished:
+        try:
+            pj = json.loads(h.get("probs_json") or "{}")
+            fin = pj.get("final", [])
+            if not isinstance(fin, list) or len(fin) != 3:
+                continue
+            p = [max(float(x) / 100, 1e-6) for x in fin]
+            y = result_map[h["actual_result"]]
+            losses.append(-np.log(p[y]))
+        except Exception:
+            continue
+    if not losses:
+        return None
+    return round(float(np.mean(losses)), 4), len(losses)
+
+
+# ============ 训练日志 ============
+def save_training_log(metrics):
+    engine = get_db_engine()
+    if not engine:
+        return
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            conn.execute(text("""
+                INSERT INTO training_log (trained_at, samples, lr_logloss, xgb_logloss, notes)
+                VALUES (NOW(), :s, :lr, :xgb, :n)
+            """), {
+                "s": metrics.get("samples", 0),
+                "lr": metrics.get("lr_logloss", 0),
+                "xgb": metrics.get("xgb_logloss", 0),
+                "n": metrics.get("notes", ""),
+            })
+            conn.commit()
+    except Exception:
+        pass
+
+
+def load_training_logs(limit=30):
+    engine = get_db_engine()
+    if not engine:
+        return []
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            result = conn.execute(text(
+                "SELECT trained_at, samples, lr_logloss, xgb_logloss, notes FROM training_log ORDER BY trained_at DESC LIMIT :lim"
+            ), {"lim": limit})
+            return [dict(r._mapping) for r in result]
+    except Exception:
+        return []
+
+
 def save_model_to_db(blob_base64, metrics):
     engine = get_db_engine()
     if not engine:
@@ -482,7 +578,6 @@ def parse_match(m):
     return " ".join(parts[:mid]), " ".join(parts[mid:])
 
 
-# ============ API 调用 ============
 @st.cache_data(ttl=3600)
 def search_fixtures_by_date(date_str):
     try:
@@ -493,7 +588,6 @@ def search_fixtures_by_date(date_str):
         return []
 
 
-# ★ 修复1：排除女足/二队
 @st.cache_data(ttl=3600)
 def search_team(name):
     en_name = cn_to_en(name)
@@ -524,7 +618,6 @@ def search_team(name):
                 t = item["team"]
                 tn = (t.get("name") or "")
                 tnl = tn.lower()
-                # 排除女足/二队/青年队
                 exclude_keywords = [" w", "women", "feminine", "ladies", "female",
                                     " u19", " u21", " u23", " ii", "youth",
                                     "academy", "reserves", "(w)"]
@@ -561,7 +654,6 @@ def get_fixture(home_id, away_id, date_str):
     return None
 
 
-# ★ 修复2：多博彩公司降级
 @st.cache_data(ttl=3600)
 def get_odds(fixture_id):
     for bm_id in [2, 8, 10, None]:
@@ -832,7 +924,6 @@ def check_data_health(injuries, h2h, h_recent, a_recent, odds):
     return checks, round(score)
 
 
-# ★ 修复3：搜索范围 4 → 10 天
 def analyze_match(home_name, away_name, date_hint=None):
     hid, hs = search_team(home_name)
     aid, as_ = search_team(away_name)
@@ -987,7 +1078,7 @@ def analyze_match(home_name, away_name, date_hint=None):
 # ================================================================
 # ============ 界面 ============
 # ================================================================
-tab1, tab2, tab3 = st.tabs(["📊 分析", "⚙️ 调参/模型", "📚 历史记录"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 分析", "⚙️ 调参/模型", "📚 历史记录", "📈 校准/回测"])
 
 with tab1:
     st.subheader("📅 按日期搜索当日比赛")
@@ -1257,6 +1348,7 @@ with tab2:
                     else:
                         blob = serialize_model(*result)
                         save_model_to_db(blob, metrics)
+                        save_training_log(metrics)
                         st.session_state["model_tuple"] = result
                         st.session_state["model_meta"] = {
                             "trained_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1450,3 +1542,57 @@ with tab3:
                                     update_result(h["id"], res)
                                     st.success("已保存")
                                     st.rerun()
+
+# ================================================================
+# ============ Tab4：概率校准 + 训练日志 ============
+# ================================================================
+with tab4:
+    st.subheader("📈 概率校准分析")
+    st.caption("校准 = 对比模型给出的概率与实际发生频率。用来判断模型在哪个区间高估/低估。")
+
+    cal = calc_calibration()
+    if cal is None:
+        st.info("样本不足 10 场，暂无法进行校准分析。请先分析并回填更多比赛赛果。")
+    else:
+        st.markdown("**主胜概率区间 vs 实际主胜率**")
+        df_cal = pd.DataFrame(cal)
+        st.dataframe(df_cal, hide_index=True)
+
+        st.markdown("**判定**")
+        for row in cal:
+            dev = row["偏差"]
+            if abs(dev) < 5:
+                st.markdown(f"✅ **{row['概率区间']}**：预测 {row['预测均值']}% → 实际 {row['实际主胜率']}%（**准确**）")
+            elif dev > 5:
+                st.markdown(f"⚠️ **{row['概率区间']}**：预测 {row['预测均值']}% → 实际 {row['实际主胜率']}%（**低估**，模型偏保守）")
+            else:
+                st.markdown(f"⚠️ **{row['概率区间']}**：预测 {row['预测均值']}% → 实际 {row['实际主胜率']}%（**高估**，模型偏激进）")
+
+    st.markdown("---")
+    st.subheader("📊 历史 LogLoss")
+    ol = calc_overall_logloss()
+    if ol:
+        loss, n = ol
+        c1, c2 = st.columns(2)
+        c1.metric("平均 LogLoss", f"{loss}")
+        c2.metric("已回填比赛", f"{n} 场")
+        st.caption("LogLoss 越低越好。0.90 以下优秀，1.00 左右正常，1.10 以上偏弱。")
+    else:
+        st.info("暂无足够的已回填比赛")
+
+    st.markdown("---")
+    st.subheader("📜 训练日志")
+    st.caption("每次点【🚀 一键学习】后会记录一次。")
+    logs = load_training_logs(30)
+    if not logs:
+        st.info("暂无训练记录")
+    else:
+        for log in logs:
+            with st.container(border=True):
+                st.markdown(f"**{log['trained_at']}**")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("样本", f"{log['samples']:,}")
+                c2.metric("LR LogLoss", f"{log['lr_logloss']:.4f}")
+                c3.metric("XGB LogLoss", f"{log['xgb_logloss']:.4f}")
+                if log.get("notes"):
+                    st.caption(log["notes"])
