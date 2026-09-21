@@ -658,7 +658,6 @@ def get_recent_form(team_id, last=10):
         return []
 
 
-# ============ 包六新增：首发阵容 + 积分榜 ============
 @st.cache_data(ttl=1800)
 def get_lineups(fixture_id):
     try:
@@ -954,7 +953,8 @@ def analyze_match(home_name, away_name, date_hint=None):
 # ================================================================
 # ============ 界面 ============
 # ================================================================
-tab1, tab2, tab3, tab4 = st.tabs(["📊 分析", "⚙️ 调参/模型", "📚 历史记录", "📈 校准/回测"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📊 分析", "⚙️ 调参/模型", "📚 历史记录", "📈 校准/回测", "🔍 球队诊断"])
 
 with tab1:
     st.subheader("📅 按日期搜索当日比赛")
@@ -1437,3 +1437,76 @@ with tab4:
                 c2.metric("LR LogLoss", f"{log['lr_logloss']:.4f}")
                 c3.metric("XGB LogLoss", f"{log['xgb_logloss']:.4f}")
                 if log.get("notes"): st.caption(log["notes"])
+
+# ================================================================
+# ============ Tab5：球队搜索诊断 ============
+# ================================================================
+with tab5:
+    st.subheader("🔍 球队搜索诊断")
+    st.caption("批量测试球队名，看哪些能搜到、哪些搜不到。把失败的队名发给我，我一次性补进映射表。")
+
+    st.markdown("**常见联赛球队快捷测试**")
+    QUICK_PRESETS = {
+        "英超": "阿森纳, 切尔西, 曼城, 曼联, 利物浦, 热刺, 纽卡斯尔, 阿斯顿维拉, 布莱顿, 西汉姆, 埃弗顿, 富勒姆, 水晶宫, 布伦特福德, 狼队, 诺丁汉森林, 伯恩茅斯, 莱斯特城, 南安普顿, 伊普斯维奇",
+        "西甲": "皇马, 巴萨, 马竞, 塞维利亚, 毕尔巴鄂, 皇家社会, 皇家贝蒂斯, 比利亚雷亚尔, 瓦伦西亚, 赫罗纳, 塞尔塔, 拉科鲁尼亚, 莱万特, 西班牙人, 赫塔菲, 巴列卡诺, 奥萨苏纳, 马洛卡, 拉斯帕尔马斯, 阿拉维斯",
+        "德甲": "拜仁, 多特, 莱比锡, 勒沃库森, 法兰克福, 斯图加特, 沃尔夫斯堡, 门兴, 不莱梅, 弗赖堡, 霍芬海姆, 美因茨, 奥格斯堡, 柏林联合, 波鸿, 海登海姆, 圣保利, 荷尔斯泰因",
+        "意甲": "尤文, 国米, AC米兰, 那不勒斯, 罗马, 拉齐奥, 亚特兰大, 佛罗伦萨, 博洛尼亚, 都灵, 乌迪内斯, 热那亚, 卡利亚里, 莱切, 维罗纳, 萨索洛, 恩波利, 蒙扎, 科莫, 帕尔马, 威尼斯",
+        "法甲": "巴黎圣日耳曼, 马赛, 里昂, 摩纳哥, 尼斯, 里尔, 朗斯, 雷恩, 斯特拉斯堡, 图卢兹, 南特, 兰斯, 布雷斯特, 蒙彼利埃, 勒阿弗尔, 欧塞尔, 昂热, 圣埃蒂安",
+        "北欧": "博多闪耀, 罗森博格, 莫尔德, 布兰, 维京, 利勒斯特罗姆, 马尔默, 佐加顿斯, 哈马比, 哥德堡, 索尔纳, 哥本哈根, 北西兰, 中日德兰, 布隆德比, 奥尔堡, 赫尔辛基, 库奥皮奥",
+        "二级联赛": "利兹联, 伯恩利, 谢菲联, 桑德兰, 米德尔斯堡, 西布朗, 诺维奇, 沃特福德, 汉堡, 帕德博恩, 沙尔克, 杜塞尔多夫, 汉诺威, 莱加内斯, 萨拉戈萨, 梅斯, 洛里昂, 阿贾克斯, 埃因霍温, 费耶诺德, 波尔图, 本菲卡, 里斯本竞技, 布鲁日, 凯尔特人, 流浪者",
+    }
+    preset_choice = st.selectbox("选择要测试的联赛", ["自定义"] + list(QUICK_PRESETS.keys()), index=0)
+    default_text = "" if preset_choice == "自定义" else QUICK_PRESETS[preset_choice]
+
+    diag_input = st.text_area(
+        "球队名（中英文均可，逗号或换行分隔）",
+        value=default_text, height=150, key="diag_input")
+
+    col_x, col_y = st.columns(2)
+    with col_x:
+        if st.button("🚀 开始诊断", type="primary", key="diag_run"):
+            names = [x.strip() for x in re.split(r"[,\n，]+", diag_input) if x.strip()]
+            if not names:
+                st.warning("请输入至少一个队名")
+            else:
+                rows = []
+                prog = st.progress(0)
+                for i, nm in enumerate(names):
+                    prog.progress((i + 1) / len(names), text=f"测试中：{nm}")
+                    en = cn_to_en(nm)
+                    tid, tname = search_team(nm)
+                    if tid:
+                        rows.append({"输入": nm, "英文名": en, "状态": "✅ 成功",
+                            "搜到的球队": tname, "队ID": tid})
+                    else:
+                        rows.append({"输入": nm, "英文名": en, "状态": "❌ 失败",
+                            "搜到的球队": "", "队ID": ""})
+                prog.empty()
+                st.session_state["diag_result"] = rows
+    with col_y:
+        if st.button("🔄 清缓存", key="diag_clear"):
+            st.cache_data.clear()
+            st.success("缓存已清，下次测试用最新映射表")
+
+    if "diag_result" in st.session_state:
+        rows = st.session_state["diag_result"]
+        success = [r for r in rows if r["状态"].startswith("✅")]
+        fail = [r for r in rows if r["状态"].startswith("❌")]
+        c1, c2, c3 = st.columns(3)
+        c1.metric("总数", len(rows))
+        c2.metric("成功", len(success))
+        c3.metric("失败", len(fail), delta_color="inverse")
+
+        st.markdown("### 📋 详细结果")
+        st.dataframe(pd.DataFrame(rows), hide_index=True)
+
+        if fail:
+            st.markdown("### ❌ 失败的球队")
+            st.caption("复制下面这段发给 AI，一次性补进映射表：")
+            fail_names = [r["输入"] for r in fail]
+            st.code("、".join(fail_names), language="text")
+
+            st.markdown("**失败原因分类**：")
+            st.markdown("- 队名不在映射表 → **补 `teams_cn.py`**")
+            st.markdown("- API-Football 没收录 → **无法修复**（换其他数据源）")
+            st.markdown("- 队名拼写错误 → **修正输入**")
