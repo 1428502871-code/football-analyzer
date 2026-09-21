@@ -28,7 +28,6 @@ db_url = os.environ.get("DB_URL", "")
 HEADERS = {"x-apisports-key": api_key}
 BASE_URL = "https://v3.football.api-sports.io"
 
-# ============ 训练用联赛代码映射 ============
 LEAGUE_CODE_MAP = {
     "英超": "E0", "英冠": "E1", "西甲": "SP1", "西乙": "SP2",
     "德甲": "D1", "德乙": "D2", "意甲": "I1", "意乙": "I2",
@@ -36,10 +35,9 @@ LEAGUE_CODE_MAP = {
     "比甲": "B1", "苏超": "SC0", "挪超": "NOR", "瑞超": "SWE",
     "丹超": "DNK", "芬超": "FIN",
 }
-TRAINING_SEASONS = ["2223", "2324", "2425"]  # 近3个赛季
+TRAINING_SEASONS = ["2223", "2324", "2425"]
 
 
-# ============ 数据库操作 ============
 def get_db_engine():
     if not db_url or not db_url.startswith("postgresql"):
         return None
@@ -141,7 +139,6 @@ def auto_update_results():
     return updated
 
 
-# ============ 模型保存/加载 ============
 def save_model_to_db(blob_base64, metrics):
     engine = get_db_engine()
     if not engine:
@@ -149,7 +146,6 @@ def save_model_to_db(blob_base64, metrics):
     try:
         from sqlalchemy import text
         with engine.connect() as conn:
-            # 清空旧模型，只保留最新
             conn.execute(text("DELETE FROM model_storage"))
             conn.execute(text("""
                 INSERT INTO model_storage (model_blob, samples, lr_logloss, xgb_logloss, notes)
@@ -180,8 +176,7 @@ def load_model_from_db():
             row = result.fetchone()
             if not row:
                 return None
-            blob = row[0]
-            model = deserialize_model(blob)
+            model = deserialize_model(row[0])
             return {
                 "model": model,
                 "trained_at": str(row[1]),
@@ -193,7 +188,6 @@ def load_model_from_db():
         return None
 
 
-# ============ 训练相关 ============
 def download_league_csv(league_cn, seasons=TRAINING_SEASONS):
     code = LEAGUE_CODE_MAP.get(league_cn)
     if not code:
@@ -217,11 +211,17 @@ def download_league_csv(league_cn, seasons=TRAINING_SEASONS):
 
 
 def preprocess_df(df):
-    """提取特征：赔率去水 + 赔率漂移"""
+    """提取特征：赔率去水 + 赔率漂移（容错版，处理 '#' 等非法字符）"""
     needed = ['B365H', 'B365D', 'B365A', 'FTHG', 'FTAG']
     for c in needed:
         if c not in df.columns:
             return None, None
+
+    for col in ['B365H', 'B365D', 'B365A', 'FTHG', 'FTAG',
+                'B365CH', 'B365CD', 'B365CA']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
     df = df.dropna(subset=needed).copy()
     if len(df) < 30:
         return None, None
@@ -233,16 +233,22 @@ def preprocess_df(df):
     df['p_draw'] = probs[:, 1]
     df['p_away'] = probs[:, 2]
 
-    # 收盘赔率（如果有）
     if all(c in df.columns for c in ['B365CH', 'B365CD', 'B365CA']):
-        odds_c = df[['B365CH', 'B365CD', 'B365CA']].values.astype(float)
-        inv_c = 1.0 / odds_c
-        probs_c = inv_c / inv_c.sum(axis=1, keepdims=True)
-        df['drift_home'] = probs_c[:, 0] - probs[:, 0]
-        df['drift_away'] = probs_c[:, 2] - probs[:, 2]
-        df['p_home_close'] = probs_c[:, 0]
-        df['p_draw_close'] = probs_c[:, 1]
-        df['p_away_close'] = probs_c[:, 2]
+        df_ch = df.dropna(subset=['B365CH', 'B365CD', 'B365CA']).copy()
+        df['p_home_close'] = df['p_home']
+        df['p_draw_close'] = df['p_draw']
+        df['p_away_close'] = df['p_away']
+        df['drift_home'] = 0.0
+        df['drift_away'] = 0.0
+        if len(df_ch) > 0:
+            odds_c = df_ch[['B365CH', 'B365CD', 'B365CA']].values.astype(float)
+            inv_c = 1.0 / odds_c
+            probs_c = inv_c / inv_c.sum(axis=1, keepdims=True)
+            df.loc[df_ch.index, 'p_home_close'] = probs_c[:, 0]
+            df.loc[df_ch.index, 'p_draw_close'] = probs_c[:, 1]
+            df.loc[df_ch.index, 'p_away_close'] = probs_c[:, 2]
+            df.loc[df_ch.index, 'drift_home'] = probs_c[:, 0] - df.loc[df_ch.index, 'p_home']
+            df.loc[df_ch.index, 'drift_away'] = probs_c[:, 2] - df.loc[df_ch.index, 'p_away']
     else:
         df['p_home_close'] = df['p_home']
         df['p_draw_close'] = df['p_draw']
@@ -250,7 +256,10 @@ def preprocess_df(df):
         df['drift_home'] = 0.0
         df['drift_away'] = 0.0
 
-    df['result'] = df.apply(lambda r: 0 if r['FTHG'] > r['FTAG'] else (1 if r['FTHG'] == r['FTAG'] else 2), axis=1)
+    df['result'] = df.apply(
+        lambda r: 0 if r['FTHG'] > r['FTAG'] else (1 if r['FTHG'] == r['FTAG'] else 2),
+        axis=1)
+
     feature_cols = ['p_home', 'p_draw', 'p_away',
                     'p_home_close', 'p_draw_close', 'p_away_close',
                     'drift_home', 'drift_away']
@@ -261,7 +270,6 @@ def train_models(df, feature_cols):
     X = df[feature_cols].values
     y = df['result'].values
 
-    # 按时间顺序切分 80/20
     split = int(len(X) * 0.8)
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
@@ -311,7 +319,6 @@ def deserialize_model(s):
 
 
 def run_full_training():
-    """下载全部联赛数据 → 训练 → 返回 (lr, scaler, xgb, metrics)"""
     all_dfs = []
     progress_ph = st.empty()
     total = len(LEAGUE_CODE_MAP)
@@ -334,12 +341,10 @@ def run_full_training():
 
 
 def predict_with_model(model_tuple, odds):
-    """用真模型预测，返回 (lr_probs, xgb_probs) 各三个概率"""
     lr, scaler, xgb = model_tuple
     h, d, a = odds
     inv = np.array([1/h, 1/d, 1/a])
     probs = inv / inv.sum()
-    # 无收盘赔率，用同一值，drift=0
     features = np.array([[
         probs[0], probs[1], probs[2],
         probs[0], probs[1], probs[2],
@@ -350,7 +355,6 @@ def predict_with_model(model_tuple, odds):
     return lr_p, xgb_p
 
 
-# ============ 通用工具 ============
 def current_season():
     now = datetime.now()
     return now.year if now.month >= 7 else now.year - 1
@@ -372,7 +376,6 @@ if "cache_time" not in st.session_state:
     st.session_state["cache_time"] = None
 if "model_loaded" not in st.session_state:
     st.session_state["model_loaded"] = False
-    # 尝试从数据库加载
     try:
         loaded = load_model_from_db()
         if loaded:
@@ -463,7 +466,6 @@ def parse_match(m):
     return " ".join(parts[:mid]), " ".join(parts[mid:])
 
 
-# ============ API 调用 ============
 @st.cache_data(ttl=3600)
 def search_fixtures_by_date(date_str):
     try:
@@ -709,7 +711,6 @@ def softmax3(base, adjust):
 
 
 def calc_all_probs(odds, coefs, league_id, params, league_name=""):
-    """五层概率：优先用真模型，无模型时用公式"""
     weights = params["weights"]
     mf = params["model_fusion"]
     override = params.get("market_fusion_override")
@@ -718,7 +719,6 @@ def calc_all_probs(odds, coefs, league_id, params, league_name=""):
     adjust = sum(coefs[k] * weights[k] for k in weights)
 
     model_used = "公式"
-    # 尝试用真模型
     if st.session_state.get("model_loaded") and st.session_state.get("model_tuple"):
         try:
             lr_p, xgb_p = predict_with_model(st.session_state["model_tuple"], odds)
@@ -733,8 +733,6 @@ def calc_all_probs(odds, coefs, league_id, params, league_name=""):
         xgb_p = softmax3(market_p, adjust * 1.0)
 
     model_p = mf["lr"] * lr_p + mf["xgb"] * xgb_p
-
-    # 叠加五项系数调整（在市场概率基础上）
     model_p = model_p * np.array([1 + adjust * 0.15, 1 - adjust * 0.05, 1 - adjust * 0.1])
     model_p = model_p / model_p.sum()
 
