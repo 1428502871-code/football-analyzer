@@ -34,6 +34,7 @@ def get_league_info(league_id, league_name_from_api=""):
     return 0.55, 0.45, league_name_from_api or "未知联赛", "普通"
 
 CN_TEAM_MAP = {
+    # 英超
     "阿森纳": "Arsenal", "切尔西": "Chelsea", "曼城": "Man City", "曼彻斯特城": "Man City",
     "曼联": "Man United", "曼彻斯特联": "Man United", "利物浦": "Liverpool",
     "热刺": "Tottenham", "托特纳姆": "Tottenham", "纽卡斯尔": "Newcastle",
@@ -42,6 +43,16 @@ CN_TEAM_MAP = {
     "水晶宫": "Crystal Palace", "布伦特福德": "Brentford", "狼队": "Wolves",
     "诺丁汉森林": "Nottingham Forest", "伯恩茅斯": "Bournemouth",
     "莱斯特城": "Leicester", "南安普顿": "Southampton", "伊普斯维奇": "Ipswich",
+    # 英冠
+    "利兹联": "Leeds", "伯恩利": "Burnley", "谢菲联": "Sheffield Utd",
+    "谢菲尔德联": "Sheffield Utd", "桑德兰": "Sunderland", "米德尔斯堡": "Middlesbrough",
+    "西布朗": "West Brom", "诺维奇": "Norwich", "沃特福德": "Watford",
+    "考文垂": "Coventry", "布里斯托城": "Bristol City", "斯旺西": "Swansea",
+    "卡迪夫城": "Cardiff", "赫尔城": "Hull", "普雷斯顿": "Preston",
+    "米尔沃尔": "Millwall", "斯托克城": "Stoke", "布莱克本": "Blackburn",
+    "女王公园": "QPR", "牛津联": "Oxford Utd", "德比郡": "Derby",
+    "朴茨茅斯": "Portsmouth", "卢顿": "Luton", "普利茅斯": "Plymouth",
+    # 西甲
     "皇马": "Real Madrid", "皇家马德里": "Real Madrid", "巴萨": "Barcelona",
     "巴塞罗那": "Barcelona", "马竞": "Atletico Madrid", "马德里竞技": "Atletico Madrid",
     "塞维利亚": "Sevilla", "毕尔巴鄂": "Athletic Bilbao", "皇家社会": "Real Sociedad",
@@ -49,6 +60,13 @@ CN_TEAM_MAP = {
     "瓦伦西亚": "Valencia", "赫罗纳": "Girona", "塞尔塔": "Celta Vigo",
     "拉科鲁尼亚": "Deportivo", "莱万特": "Levante", "西班牙人": "Espanyol",
     "赫塔菲": "Getafe", "巴列卡诺": "Rayo Vallecano", "奥萨苏纳": "Osasuna",
+    "马洛卡": "Mallorca", "拉斯帕尔马斯": "Las Palmas", "阿拉维斯": "Alaves",
+    # 西乙
+    "莱加内斯": "Leganes", "萨拉戈萨": "Zaragoza", "希洪竞技": "Sporting Gijon",
+    "马拉加": "Malaga", "桑坦德": "Racing Santander", "埃瓦尔": "Eibar",
+    "韦斯卡": "Huesca", "卡迪斯": "Cadiz", "格拉纳达": "Granada",
+    "阿尔梅里亚": "Almeria", "费罗尔": "Ferrol", "米兰德斯": "Mirandes",
+    # 德甲
     "拜仁": "Bayern Munich", "拜仁慕尼黑": "Bayern Munich", "多特": "Dortmund",
     "多特蒙德": "Dortmund", "莱比锡": "RB Leipzig", "勒沃库森": "Bayer Leverkusen",
     "法兰克福": "Eintracht Frankfurt", "斯图加特": "Stuttgart",
@@ -56,6 +74,14 @@ CN_TEAM_MAP = {
     "弗赖堡": "Freiburg", "霍芬海姆": "Hoffenheim", "美因茨": "Mainz",
     "奥格斯堡": "Augsburg", "柏林联合": "Union Berlin", "波鸿": "Bochum",
     "海登海姆": "Heidenheim", "圣保利": "St Pauli", "荷尔斯泰因": "Holstein Kiel",
+    # 德乙
+    "汉堡": "Hamburger SV", "帕德博恩": "SC Paderborn", "沙尔克": "Schalke",
+    "沙尔克04": "Schalke", "杜塞尔多夫": "Fortuna Dusseldorf", "汉诺威": "Hannover",
+    "凯泽斯劳滕": "Kaiserslautern", "纽伦堡": "Nurnberg", "卡尔斯鲁厄": "Karlsruher",
+    "菲尔特": "Greuther Furth", "柏林赫塔": "Hertha Berlin", "科隆": "Cologne",
+    "马格德堡": "Magdeburg", "布伦瑞克": "Braunschweig", "达姆施塔特": "Darmstadt",
+    "明斯特": "Preussen Munster", "雷根斯堡": "Regensburg", "乌尔姆": "Ulm",
+    # 意甲
     "尤文": "Juventus", "尤文图斯": "Juventus", "国米": "Inter",
     "国际米兰": "Inter", "AC米兰": "AC Milan", "米兰": "AC Milan",
     "那不勒斯": "Napoli", "罗马": "Roma", "拉齐奥": "Lazio",
@@ -63,20 +89,40 @@ CN_TEAM_MAP = {
     "都灵": "Torino", "乌迪内斯": "Udinese", "热那亚": "Genoa",
     "卡利亚里": "Cagliari", "莱切": "Lecce", "维罗纳": "Verona",
     "萨索洛": "Sassuolo", "恩波利": "Empoli", "蒙扎": "Monza", "科莫": "Como",
+    "帕尔马": "Parma", "威尼斯": "Venezia",
+    # 法甲
     "巴黎": "PSG", "巴黎圣日耳曼": "PSG", "马赛": "Marseille", "里昂": "Lyon",
     "摩纳哥": "Monaco", "尼斯": "Nice", "里尔": "Lille", "朗斯": "Lens",
     "雷恩": "Rennes", "斯特拉斯堡": "Strasbourg", "图卢兹": "Toulouse",
     "南特": "Nantes", "兰斯": "Reims", "布雷斯特": "Brest",
     "蒙彼利埃": "Montpellier", "勒阿弗尔": "Le Havre", "欧塞尔": "Auxerre",
     "昂热": "Angers", "圣埃蒂安": "Saint-Etienne",
+    # 法乙
+    "梅斯": "Metz", "洛里昂": "Lorient", "克莱蒙": "Clermont",
+    "阿雅克肖": "Ajaccio", "巴斯蒂亚": "Bastia", "甘冈": "Guingamp",
+    "格勒诺布尔": "Grenoble", "罗德兹": "Rodez", "特鲁瓦": "Troyes",
+    "亚眠": "Amiens", "波城": "Pau", "拉瓦勒": "Laval",
+    # 荷甲/葡超/比甲/苏超
     "阿贾克斯": "Ajax", "埃因霍温": "PSV", "费耶诺德": "Feyenoord",
+    "阿尔克马尔": "AZ Alkmaar", "特温特": "Twente", "乌德勒支": "Utrecht",
     "波尔图": "Porto", "本菲卡": "Benfica", "里斯本竞技": "Sporting CP",
-    "凯尔特人": "Celtic", "流浪者": "Rangers",
+    "布拉加": "Braga", "吉马良斯": "Vitoria Guimaraes",
+    "布鲁日": "Club Brugge", "安德莱赫特": "Anderlecht", "根特": "Gent",
+    "凯尔特人": "Celtic", "流浪者": "Rangers", "阿伯丁": "Aberdeen",
+    "哈茨": "Hearts", "希伯尼安": "Hibernian",
+    # 北欧
     "罗森博格": "Rosenborg", "莫尔德": "Molde", "博多闪耀": "Bodo Glimt",
-    "马尔默": "Malmo", "哥本哈根": "Copenhagen", "北西兰": "Nordsjaelland",
-    "加拉塔萨雷": "Galatasaray", "费内巴切": "Fenerbahce",
-    "顿涅茨克矿工": "Shakhtar", "萨尔茨堡": "Salzburg",
-    "布鲁日": "Club Brugge", "年轻人": "Young Boys",
+    "布兰": "Brann", "维京": "Viking", "利勒斯特罗姆": "Lillestrom",
+    "马尔默": "Malmo", "佐加顿斯": "Djurgarden", "哈马比": "Hammarby",
+    "哥德堡": "Goteborg", "索尔纳": "AIK",
+    "哥本哈根": "Copenhagen", "北西兰": "Nordsjaelland", "中日德兰": "Midtjylland",
+    "布隆德比": "Brondby", "奥尔堡": "Aalborg",
+    "赫尔辛基": "HJK Helsinki", "库奥皮奥": "KuPS",
+    # 欧战常见
+    "加拉塔萨雷": "Galatasaray", "费内巴切": "Fenerbahce", "贝西克塔斯": "Besiktas",
+    "顿涅茨克矿工": "Shakhtar", "基辅迪纳摩": "Dynamo Kyiv", "萨尔茨堡": "Salzburg",
+    "年轻人": "Young Boys", "巴塞尔": "Basel", "红星": "Red Star Belgrade",
+    "布拉格斯拉维亚": "Slavia Prague", "布拉格斯巴达": "Sparta Prague",
 }
 
 EN_TO_CN = {}
@@ -98,8 +144,35 @@ def en_to_cn(en_name):
         if en.lower() in el or el in en.lower(): return cn
     return en_name
 
+def parse_match(m):
+    """智能解析比赛字符串，返回 (主队, 客队) 或 (None, None)"""
+    m = m.replace("vs", " ").replace("VS", " ").replace("对", " ").strip()
+    
+    # 优先：扫描是否包含映射表里的中文队名
+    found = []
+    for cn in CN_TEAM_MAP.keys():
+        idx = m.find(cn)
+        if idx != -1:
+            found.append((idx, cn))
+    found.sort()
+    
+    if len(found) >= 2:
+        return found[0][1], found[1][1]
+    
+    # 退路：按空格切分，智能合并前缀
+    parts = m.split()
+    if len(parts) < 2:
+        return None, None
+    
+    prefixes = {"SC", "FC", "AC", "AS", "RC", "CF", "SV", "VfL", "VfB", "TSG", "BSC", "SCO"}
+    if parts[0] in prefixes and len(parts) >= 3:
+        return parts[0] + " " + parts[1], " ".join(parts[2:])
+    
+    mid = len(parts) // 2
+    return " ".join(parts[:mid]), " ".join(parts[mid:])
+
 # ============ API 调用（带缓存） ============
-@st.cache_data(ttl=3600)  # 1小时缓存
+@st.cache_data(ttl=3600)
 def search_fixtures_by_date(date_str):
     try:
         r = requests.get(f"{BASE_URL}/fixtures", headers=HEADERS,
@@ -251,27 +324,22 @@ def calc_all_probs(odds, coefs, league_id, league_name=""):
 # ============ 数据健康度检查 ============
 def check_data_health(injuries, h2h, h_recent, a_recent, odds):
     checks = []
-    # 赔率
     if odds and odds[0]:
         checks.append(("✅", "赔率数据", "完整（Pinnacle）"))
     else:
         checks.append(("❌", "赔率数据", "缺失，无法计算市场概率"))
-    # 伤停
     if injuries:
         checks.append(("✅", "伤停数据", f"完整（{len(injuries)}条记录）"))
     else:
         checks.append(("⚠️", "伤停数据", "无记录，可能未公布或数据源延迟"))
-    # H2H
     if h2h:
         checks.append(("✅", "历史交战", f"完整（近{len(h2h)}次）"))
     else:
         checks.append(("⚠️", "历史交战", "无记录，H2H系数按0处理"))
-    # 近期状态
     if h_recent and a_recent:
         checks.append(("✅", "近期状态", f"完整（主队{len(h_recent)}场，客队{len(a_recent)}场）"))
     else:
         checks.append(("⚠️", "近期状态", "数据缺失，状态系数按0处理"))
-    # 计算整体健康度
     score = sum(1 for c in checks if c[0] == "✅") / len(checks) * 100
     return checks, round(score)
 
@@ -280,7 +348,7 @@ def analyze_match(home_name, away_name):
     home_id, home_std = search_team(home_name)
     away_id, away_std = search_team(away_name)
     if not home_id or not away_id:
-        return None, f"球队搜索失败：{home_name} / {away_name}"
+        return None, f"球队搜索失败：{home_name} / {away_name}（可尝试补充到映射表）"
     
     fixture = None
     for offset in range(0, 4):
@@ -315,7 +383,6 @@ def analyze_match(home_name, away_name):
     home_cn = en_to_cn(home_std)
     away_cn = en_to_cn(away_std)
     
-    # 整理伤停明细
     inj_list = []
     for inj in injuries:
         t_id = inj["team"]["id"]
@@ -327,7 +394,6 @@ def analyze_match(home_name, away_name):
             "原因": inj["player"].get("reason", inj.get("type", "")),
         })
     
-    # 整理H2H
     h2h_list = []
     for m in h2h[:5]:
         h_cn = en_to_cn(m["teams"]["home"]["name"])
@@ -339,7 +405,6 @@ def analyze_match(home_name, away_name):
             "客队": a_cn,
         })
     
-    # 整理近期战绩
     def fmt_recent(recent, team_id, team_cn):
         rows = []
         for m in recent:
@@ -449,9 +514,11 @@ if st.button("🚀 开始批量分析", type="primary"):
         progress = st.progress(0)
         for i, m in enumerate(all_matches):
             progress.progress((i + 1) / len(all_matches), text=f"正在分析：{m}")
-            parts = m.replace("vs", "").replace("VS", "").replace("对", " ").split()
-            if len(parts) < 2: continue
-            r, err = analyze_match(parts[0], parts[1])
+            home, away = parse_match(m)
+            if not home or not away:
+                st.warning(f"无法解析：{m}")
+                continue
+            r, err = analyze_match(home, away)
             if err: st.warning(err)
             else: results.append(r)
         progress.empty()
@@ -462,7 +529,7 @@ if st.button("🚀 开始批量分析", type="primary"):
             st.session_state["results"] = results
             st.success(f"分析完成！共 {len(results)} 场")
 
-# ============ 结果展示（带完整数据依据） ============
+# ============ 结果展示 ============
 if "results" in st.session_state:
     st.markdown("---")
     st.subheader("📋 分析结果总览")
@@ -479,12 +546,10 @@ if "results" in st.session_state:
             col3.metric("客胜", f"{p['final'][2]}%")
             
             with st.expander("🔍 数据依据详情"):
-                # 数据健康度
                 st.markdown(f"### 🩺 本场数据健康度：{r['health_score']}%")
                 for icon, name, detail in r["health"]:
                     st.markdown(f"- {icon} **{name}**：{detail}")
                 
-                # 伤停明细
                 st.markdown("### 🩺 伤停明细")
                 if r["injuries"]:
                     st.dataframe(pd.DataFrame(r["injuries"]), hide_index=True)
@@ -492,7 +557,6 @@ if "results" in st.session_state:
                     st.caption("⚠️ 无伤停记录")
                 st.caption("数据源：API-Football")
                 
-                # 五层概率
                 st.markdown("### 📊 五层概率对比")
                 st.dataframe(pd.DataFrame({
                     "层级": ["逻辑回归", "XGBoost", "模型融合", "市场去水", "最终融合"],
@@ -501,11 +565,9 @@ if "results" in st.session_state:
                     "客胜": [f"{p['lr'][2]}%", f"{p['xgb'][2]}%", f"{p['model'][2]}%", f"{p['market'][2]}%", f"**{p['final'][2]}%**"],
                 }), hide_index=True)
                 
-                # 五项系数
                 st.markdown("### 🎛️ 五项系数")
                 st.json(r["coefs"])
                 
-                # 近期战绩
                 st.markdown(f"### 📈 近期战绩 - {r['home_cn']}")
                 if r["home_recent"]:
                     st.dataframe(pd.DataFrame(r["home_recent"]), hide_index=True)
@@ -513,27 +575,24 @@ if "results" in st.session_state:
                 if r["away_recent"]:
                     st.dataframe(pd.DataFrame(r["away_recent"]), hide_index=True)
                 
-                # H2H
                 st.markdown("### ⚔️ 历史交战 (近5次)")
                 if r["h2h"]:
                     st.dataframe(pd.DataFrame(r["h2h"]), hide_index=True)
                 else:
                     st.caption("⚠️ 无H2H记录")
                 
-                # 赔率
                 st.markdown("### 💱 市场赔率（Pinnacle）")
                 st.markdown(f"主胜 **{r['odds'][0]}** / 平局 **{r['odds'][1]}** / 客胜 **{r['odds'][2]}**")
                 st.caption(f"数据抓取时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # 二串一推荐
     st.markdown("---")
     st.subheader("🎯 今日最稳二串一推荐")
     
     candidates = []
     for r in st.session_state["results"]:
         p = r["probs"]["final"]
-        max_p = max(p)
-        max_idx = p.index(max_p)
+        max_idx = int(np.argmax(p))       # ★ 修改点
+        max_p = p[max_idx]                # ★ 修改点
         odd = r["odds"][max_idx]
         if max_p > 60 and 1.30 <= odd <= 2.50 and r["health_score"] >= 80:
             market_p = r["probs"]["market"]
