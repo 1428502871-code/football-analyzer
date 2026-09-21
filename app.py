@@ -19,6 +19,11 @@ from sklearn.metrics import log_loss
 from xgboost import XGBClassifier
 
 from teams_cn import CN_TEAM_MAP, EN_TO_CN, cn_to_en, en_to_cn, translate_injury_reason
+from city_coords import get_travel_km
+from extended_features import (
+    calc_schedule_density, calc_travel_factor, calc_eu_pressure,
+    is_eu_match, get_team_league, LEAGUE_TIER,
+)
 
 st.set_page_config(page_title="足球分析模型", layout="wide", page_icon="⚽")
 st.title("⚽ 足球分析模型 - 完整版")
@@ -45,19 +50,11 @@ YELLOW_THRESHOLD = {
     "丹超": 4, "芬超": 4,
 }
 
-# 所有支持联赛的中文名列表
-SUPPORTED_LEAGUES = list(dict.fromkeys([v[2] for v in {
-    39:  (0, 0, "英超", ""), 140: (0, 0, "西甲", ""),
-    78:  (0, 0, "德甲", ""), 135: (0, 0, "意甲", ""),
-    61:  (0, 0, "法甲", ""), 2:   (0, 0, "欧冠", ""),
-    3:   (0, 0, "欧联", ""), 848: (0, 0, "欧协联", ""),
-    40:  (0, 0, "英冠", ""), 79:  (0, 0, "德乙", ""),
-    141: (0, 0, "西乙", ""), 62:  (0, 0, "法乙", ""),
-    88:  (0, 0, "荷甲", ""), 94:  (0, 0, "葡超", ""),
-    144: (0, 0, "比甲", ""), 179: (0, 0, "苏超", ""),
-    103: (0, 0, "挪超", ""), 113: (0, 0, "瑞超", ""),
-    119: (0, 0, "丹超", ""), 108: (0, 0, "芬超", ""),
-}.values()]))
+SUPPORTED_LEAGUES = ["英超", "西甲", "德甲", "意甲", "法甲",
+                     "欧冠", "欧联", "欧协联",
+                     "英冠", "德乙", "西乙", "法乙",
+                     "荷甲", "葡超", "比甲", "苏超",
+                     "挪超", "瑞超", "丹超", "芬超"]
 
 
 def get_db_engine():
@@ -173,10 +170,8 @@ def save_model_to_db(blob_base64, metrics):
                 INSERT INTO model_storage (model_blob, samples, lr_logloss, xgb_logloss, notes)
                 VALUES (:b, :s, :lr, :xgb, :n)
             """), {
-                "b": blob_base64,
-                "s": metrics.get("samples", 0),
-                "lr": metrics.get("lr_logloss", 0),
-                "xgb": metrics.get("xgb_logloss", 0),
+                "b": blob_base64, "s": metrics.get("samples", 0),
+                "lr": metrics.get("lr_logloss", 0), "xgb": metrics.get("xgb_logloss", 0),
                 "n": metrics.get("notes", ""),
             })
             conn.commit()
@@ -198,14 +193,8 @@ def load_model_from_db():
             row = result.fetchone()
             if not row:
                 return None
-            model = deserialize_model(row[0])
-            return {
-                "model": model,
-                "trained_at": str(row[1]),
-                "samples": row[2],
-                "lr_logloss": row[3],
-                "xgb_logloss": row[4],
-            }
+            return {"model": deserialize_model(row[0]), "trained_at": str(row[1]),
+                    "samples": row[2], "lr_logloss": row[3], "xgb_logloss": row[4]}
     except Exception:
         return None
 
@@ -237,23 +226,18 @@ def preprocess_df(df):
     for c in needed:
         if c not in df.columns:
             return None, None
-
-    for col in ['B365H', 'B365D', 'B365A', 'FTHG', 'FTAG',
-                'B365CH', 'B365CD', 'B365CA']:
+    for col in ['B365H', 'B365D', 'B365A', 'FTHG', 'FTAG', 'B365CH', 'B365CD', 'B365CA']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
-
     df = df.dropna(subset=needed).copy()
     if len(df) < 30:
         return None, None
-
     odds = df[['B365H', 'B365D', 'B365A']].values.astype(float)
     inv = 1.0 / odds
     probs = inv / inv.sum(axis=1, keepdims=True)
     df['p_home'] = probs[:, 0]
     df['p_draw'] = probs[:, 1]
     df['p_away'] = probs[:, 2]
-
     if all(c in df.columns for c in ['B365CH', 'B365CD', 'B365CA']):
         df_ch = df.dropna(subset=['B365CH', 'B365CD', 'B365CA']).copy()
         df['p_home_close'] = df['p_home']
@@ -276,11 +260,8 @@ def preprocess_df(df):
         df['p_away_close'] = df['p_away']
         df['drift_home'] = 0.0
         df['drift_away'] = 0.0
-
     df['result'] = df.apply(
-        lambda r: 0 if r['FTHG'] > r['FTAG'] else (1 if r['FTHG'] == r['FTAG'] else 2),
-        axis=1)
-
+        lambda r: 0 if r['FTHG'] > r['FTAG'] else (1 if r['FTHG'] == r['FTAG'] else 2), axis=1)
     feature_cols = ['p_home', 'p_draw', 'p_away',
                     'p_home_close', 'p_draw_close', 'p_away_close',
                     'drift_home', 'drift_away']
@@ -290,49 +271,33 @@ def preprocess_df(df):
 def train_models(df, feature_cols):
     X = df[feature_cols].values
     y = df['result'].values
-
     split = int(len(X) * 0.8)
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
-
     scaler = StandardScaler()
     X_train_s = scaler.fit_transform(X_train)
     X_test_s = scaler.transform(X_test)
-
     lr = LogisticRegression(multi_class='multinomial', solver='lbfgs',
                             max_iter=1000, class_weight='balanced')
     lr.fit(X_train_s, y_train)
-
-    xgb = XGBClassifier(
-        objective='multi:softprob', num_class=3,
-        n_estimators=200, max_depth=4, learning_rate=0.05,
-        subsample=0.8, colsample_bytree=0.8,
-        eval_metric='mlogloss', verbosity=0, use_label_encoder=False
-    )
+    xgb = XGBClassifier(objective='multi:softprob', num_class=3,
+                        n_estimators=200, max_depth=4, learning_rate=0.05,
+                        subsample=0.8, colsample_bytree=0.8,
+                        eval_metric='mlogloss', verbosity=0, use_label_encoder=False)
     xgb.fit(X_train, y_train)
-
     try:
-        lr_proba = lr.predict_proba(X_test_s)
-        xgb_proba = xgb.predict_proba(X_test)
-        lr_loss = float(log_loss(y_test, lr_proba))
-        xgb_loss = float(log_loss(y_test, xgb_proba))
+        lr_loss = float(log_loss(y_test, lr.predict_proba(X_test_s)))
+        xgb_loss = float(log_loss(y_test, xgb.predict_proba(X_test)))
     except Exception:
         lr_loss, xgb_loss = 0, 0
-
-    metrics = {
-        "samples": len(df),
-        "train": split,
-        "test": len(X) - split,
-        "lr_logloss": lr_loss,
-        "xgb_logloss": xgb_loss,
-        "notes": f"联赛数 {df['league_cn'].nunique()}，赛季 {df['season'].nunique()}",
-    }
+    metrics = {"samples": len(df), "train": split, "test": len(X) - split,
+               "lr_logloss": lr_loss, "xgb_logloss": xgb_loss,
+               "notes": f"联赛数 {df['league_cn'].nunique()}，赛季 {df['season'].nunique()}"}
     return lr, scaler, xgb, metrics
 
 
 def serialize_model(lr, scaler, xgb):
-    blob = {"lr": lr, "scaler": scaler, "xgb": xgb}
-    return base64.b64encode(pickle.dumps(blob)).decode('utf-8')
+    return base64.b64encode(pickle.dumps({"lr": lr, "scaler": scaler, "xgb": xgb})).decode('utf-8')
 
 
 def deserialize_model(s):
@@ -352,10 +317,8 @@ def run_full_training():
         if clean is not None:
             all_dfs.append(clean)
     progress_ph.empty()
-
     if not all_dfs:
         return None, None
-
     combined = pd.concat(all_dfs, ignore_index=True)
     lr, scaler, xgb, metrics = train_models(combined, feat_cols)
     return (lr, scaler, xgb), metrics
@@ -366,14 +329,9 @@ def predict_with_model(model_tuple, odds):
     h, d, a = odds
     inv = np.array([1/h, 1/d, 1/a])
     probs = inv / inv.sum()
-    features = np.array([[
-        probs[0], probs[1], probs[2],
-        probs[0], probs[1], probs[2],
-        0.0, 0.0
-    ]])
-    lr_p = lr.predict_proba(scaler.transform(features))[0]
-    xgb_p = xgb.predict_proba(features)[0]
-    return lr_p, xgb_p
+    features = np.array([[probs[0], probs[1], probs[2],
+                          probs[0], probs[1], probs[2], 0.0, 0.0]])
+    return lr.predict_proba(scaler.transform(features))[0], xgb.predict_proba(features)[0]
 
 
 def current_season():
@@ -381,55 +339,50 @@ def current_season():
     return now.year if now.month >= 7 else now.year - 1
 
 
-# ============ 参数体系（包三核心：联赛差异化） ============
 def _base_params():
     return {
         "weights": {"injury": 0.20, "home_away": 0.20, "h2h": 0.18, "form": 0.21, "motivation": 0.21},
+        "extended_weights": {"schedule": 0.5, "travel": 0.3, "eu_pressure": 0.5},
         "model_fusion": {"lr": 0.45, "xgb": 0.55},
         "market_fusion_override": None,
     }
 
 
 def get_default_params():
-    """返回带联赛差异化结构的完整参数"""
     default = _base_params()
     by_league = {}
-
-    # 所有支持联赛默认继承 base
     for lg in SUPPORTED_LEAGUES:
         by_league[lg] = copy.deepcopy(default)
 
-    # ===== 联赛差异化的初始值（可后续在 UI 中调） =====
-    # 英超：伤停权重高（联赛竞争激烈）
+    # 联赛差异化初始值
     by_league["英超"]["weights"] = {"injury": 0.22, "home_away": 0.20, "h2h": 0.15, "form": 0.22, "motivation": 0.21}
-    # 德甲：状态权重高（球队波动大）
     by_league["德甲"]["weights"] = {"injury": 0.20, "home_away": 0.20, "h2h": 0.15, "form": 0.24, "motivation": 0.21}
-    # 意甲：战意权重高（中游球队战意差异大）
     by_league["意甲"]["weights"] = {"injury": 0.21, "home_away": 0.19, "h2h": 0.16, "form": 0.21, "motivation": 0.23}
-    # 西甲：H2H 重要（同城德比多）
     by_league["西甲"]["weights"] = {"injury": 0.19, "home_away": 0.20, "h2h": 0.20, "form": 0.21, "motivation": 0.20}
-    # 法甲：主客场差异相对小（联赛整体保守）
     by_league["法甲"]["weights"] = {"injury": 0.21, "home_away": 0.18, "h2h": 0.17, "form": 0.22, "motivation": 0.22}
-    # 挪超：主客场差异大（长途+人工草皮）
     by_league["挪超"]["weights"] = {"injury": 0.18, "home_away": 0.28, "h2h": 0.15, "form": 0.22, "motivation": 0.17}
-    # 瑞超：同挪超
     by_league["瑞超"]["weights"] = {"injury": 0.18, "home_away": 0.28, "h2h": 0.15, "form": 0.22, "motivation": 0.17}
-    # 丹超：主客场差异大
     by_league["丹超"]["weights"] = {"injury": 0.19, "home_away": 0.26, "h2h": 0.15, "form": 0.22, "motivation": 0.18}
-    # 芬超：主客场差异大，H2H 意义弱
     by_league["芬超"]["weights"] = {"injury": 0.18, "home_away": 0.28, "h2h": 0.13, "form": 0.23, "motivation": 0.18}
-    # 欧战：伤停权重高（强强对话，核心球员更重要），市场融合已经 0.70 在 LEAGUE_MAP 里
     by_league["欧冠"]["weights"] = {"injury": 0.24, "home_away": 0.18, "h2h": 0.18, "form": 0.22, "motivation": 0.18}
     by_league["欧联"]["weights"] = {"injury": 0.22, "home_away": 0.19, "h2h": 0.18, "form": 0.23, "motivation": 0.18}
     by_league["欧协联"]["weights"] = {"injury": 0.22, "home_away": 0.19, "h2h": 0.18, "form": 0.23, "motivation": 0.18}
+
+    # 欧战扩展权重加大
+    by_league["欧冠"]["extended_weights"] = {"schedule": 0.6, "travel": 0.4, "eu_pressure": 0.8}
+    by_league["欧联"]["extended_weights"] = {"schedule": 0.6, "travel": 0.4, "eu_pressure": 0.8}
+    by_league["欧协联"]["extended_weights"] = {"schedule": 0.5, "travel": 0.4, "eu_pressure": 0.7}
+
+    # 北欧旅途权重加大
+    by_league["挪超"]["extended_weights"] = {"schedule": 0.5, "travel": 0.6, "eu_pressure": 0.5}
+    by_league["瑞超"]["extended_weights"] = {"schedule": 0.5, "travel": 0.6, "eu_pressure": 0.5}
+    by_league["芬超"]["extended_weights"] = {"schedule": 0.5, "travel": 0.7, "eu_pressure": 0.5}
 
     return {"default": default, "by_league": by_league}
 
 
 def get_params_for_league(params, league_cn):
-    """取该联赛的参数，没有就用 default"""
     if not isinstance(params, dict) or "by_league" not in params:
-        # 兼容旧结构，直接返回
         return params if "weights" in params else _base_params()
     if league_cn in params["by_league"]:
         return params["by_league"][league_cn]
@@ -439,7 +392,6 @@ def get_params_for_league(params, league_cn):
 if "params" not in st.session_state:
     st.session_state["params"] = get_default_params()
 else:
-    # 兼容旧结构：检测到没有 by_league 就重新初始化
     if not isinstance(st.session_state["params"], dict) or "by_league" not in st.session_state["params"]:
         st.session_state["params"] = get_default_params()
 
@@ -454,16 +406,12 @@ if "model_loaded" not in st.session_state:
         if loaded:
             st.session_state["model_tuple"] = loaded["model"]
             st.session_state["model_meta"] = {
-                "trained_at": loaded["trained_at"],
-                "samples": loaded["samples"],
-                "lr_logloss": loaded["lr_logloss"],
-                "xgb_logloss": loaded["xgb_logloss"],
+                "trained_at": loaded["trained_at"], "samples": loaded["samples"],
+                "lr_logloss": loaded["lr_logloss"], "xgb_logloss": loaded["xgb_logloss"],
             }
             st.session_state["model_loaded"] = True
     except Exception:
         pass
-
-
 POSITION_CN = {"Goalkeeper": "门将", "Defender": "后卫", "Midfielder": "中场",
                "Attacker": "前锋", "Forward": "前锋"}
 
@@ -676,14 +624,12 @@ def get_player_stats(player_id):
                 best = max(sl, key=lambda s: s["games"].get("minutes") or 0)
                 g = best.get("games", {})
                 cards = best.get("cards", {}) or {}
-                return {
-                    "position": g.get("position", "") or "",
-                    "minutes": g.get("minutes") or 0,
-                    "appearences": g.get("appearences") or 0,
-                    "yellow": cards.get("yellow") or 0,
-                    "yellowred": cards.get("yellowred") or 0,
-                    "red": cards.get("red") or 0,
-                }
+                return {"position": g.get("position", "") or "",
+                        "minutes": g.get("minutes") or 0,
+                        "appearences": g.get("appearences") or 0,
+                        "yellow": cards.get("yellow") or 0,
+                        "yellowred": cards.get("yellowred") or 0,
+                        "red": cards.get("red") or 0}
     except Exception:
         pass
     return {"position": "", "minutes": 0, "appearences": 0,
@@ -711,10 +657,21 @@ def get_h2h(home_id, away_id):
 
 
 @st.cache_data(ttl=3600)
-def get_recent_form(team_id, last=6):
+def get_recent_form(team_id, last=10):
     try:
         r = requests.get(f"{BASE_URL}/fixtures", headers=HEADERS,
                          params={"team": team_id, "last": last, "status": "FT"}, timeout=10)
+        return r.json().get("response", [])
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=3600)
+def get_team_upcoming(team_id, last=10):
+    """获取球队最近+未来比赛（用于赛程密度计算）"""
+    try:
+        r = requests.get(f"{BASE_URL}/fixtures", headers=HEADERS,
+                         params={"team": team_id, "last": last}, timeout=10)
         return r.json().get("response", [])
     except Exception:
         return []
@@ -776,17 +733,23 @@ def softmax3(base, adjust):
     return e / e.sum()
 
 
-def calc_all_probs(odds, coefs, league_id, params, league_name=""):
-    """按联赛取对应参数"""
+def calc_all_probs(odds, coefs, league_id, params, league_name="",
+                   schedule_coef=0.0, travel_coef=0.0, eu_pressure=0.0):
     _, _, league_cn, _ = get_league_info(league_id, league_name)
     league_params = get_params_for_league(params, league_cn)
 
     weights = league_params["weights"]
+    ew = league_params.get("extended_weights", {"schedule": 0.5, "travel": 0.3, "eu_pressure": 0.5})
     mf = league_params["model_fusion"]
     override = league_params.get("market_fusion_override")
 
     market_p = np.array(devig(odds))
-    adjust = sum(coefs[k] * weights[k] for k in weights)
+    base_adjust = sum(coefs.get(k, 0) * weights[k] for k in weights)
+
+    ext_adjust = (schedule_coef * ew.get("schedule", 0.5) +
+                  travel_coef * ew.get("travel", 0.3) +
+                  eu_pressure * ew.get("eu_pressure", 0.5))
+    adjust = base_adjust + ext_adjust * 0.3
 
     model_used = "公式"
     if st.session_state.get("model_loaded") and st.session_state.get("model_tuple"):
@@ -819,6 +782,7 @@ def calc_all_probs(odds, coefs, league_id, params, league_name=""):
         "final": (final_p * 100).round(1),
         "league_cn": league_cn, "model_w": mw, "market_w": mkw,
         "model_source": model_used,
+        "ext_adjust": round(ext_adjust, 3),
     }
 
 
@@ -870,7 +834,6 @@ def check_data_health(injuries, h2h, h_recent, a_recent, odds):
     score = sum(1 for c in checks if c[0] == "✅") / len(checks) * 100
     return checks, round(score)
 
-
 def analyze_match(home_name, away_name, date_hint=None):
     hid, hs = search_team(home_name)
     aid, as_ = search_team(away_name)
@@ -904,6 +867,7 @@ def analyze_match(home_name, away_name, date_hint=None):
     lid = fixture["league"]["id"]
     lname = fixture["league"]["name"]
     lcountry = fixture["league"].get("country", "")
+    match_date_str = fixture["fixture"]["date"][:10]
 
     odds = get_odds(fid)
     if not odds[0]:
@@ -911,20 +875,46 @@ def analyze_match(home_name, away_name, date_hint=None):
 
     injuries = get_injuries(fid)
     h2h = get_h2h(hid, aid)
-    hr = get_recent_form(hid)
-    ar = get_recent_form(aid)
+    hr_all = get_recent_form(hid, last=10)
+    ar_all = get_recent_form(aid, last=10)
+    hr = hr_all[:6]
+    ar = ar_all[:6]
     handicap, ah_h, ah_a = get_asian_handicap(fid)
 
     inj_coef, _, _ = calc_injury_coef(injuries, hid, aid)
     h2h_coef = calc_h2h_coef(h2h, hid)
     form_coef = calc_form_diff(hr, ar, hid, aid)
-    coefs = {"injury": inj_coef, "home_away": 0.3, "h2h": h2h_coef, "form": form_coef, "motivation": 0.0}
+
+    # ===== 扩展特征 =====
+    rest_days_home, sched_home = calc_schedule_density(hr_all, hid, match_date_str)
+    rest_days_away, sched_away = calc_schedule_density(ar_all, aid, match_date_str)
+    if rest_days_home is not None and rest_days_away is not None:
+        schedule_coef = round(max(-1.0, min(1.0, sched_home - sched_away)), 2)
+    else:
+        schedule_coef = 0.0
+
+    travel_km = get_travel_km(hs, as_)
+    travel_coef = calc_travel_factor(travel_km)
+
+    # 欧战跨联赛压制
+    _, _, league_cn_tmp, _ = get_league_info(lid, lname)
+    eu_pressure = 0.0
+    if is_eu_match(league_cn_tmp):
+        home_league = get_team_league(hs)
+        away_league = get_team_league(as_)
+        if home_league and away_league:
+            eu_pressure = calc_eu_pressure(home_league, away_league)
+
+    coefs = {
+        "injury": inj_coef, "home_away": 0.3, "h2h": h2h_coef,
+        "form": form_coef, "motivation": 0.0,
+        "schedule": schedule_coef, "travel": travel_coef, "eu_pressure": eu_pressure,
+    }
 
     health, hscore = check_data_health(injuries, h2h, hr, ar, odds)
     hcn = en_to_cn(hs)
     acn = en_to_cn(as_)
 
-    _, _, league_cn_tmp, _ = get_league_info(lid, lname)
     y_threshold = YELLOW_THRESHOLD.get(league_cn_tmp, 5)
 
     inj_list = []
@@ -936,12 +926,10 @@ def analyze_match(home_name, away_name, date_hint=None):
                                                    "yellow": 0, "yellowred": 0, "red": 0}
         raw_pos = inj["player"].get("position", "") or stats["position"]
         reason_cn = translate_injury_reason(inj["player"].get("reason", inj.get("type", "")))
-
         y = stats.get("yellow", 0)
         yr = stats.get("yellowred", 0)
         rr = stats.get("red", 0)
         reason_lower = (inj["player"].get("reason") or inj.get("type") or "").lower()
-
         if "red" in reason_lower or rr > 0:
             status = "🔴 红牌停赛"
         elif "yellow" in reason_lower or "suspended" in reason_lower:
@@ -950,7 +938,6 @@ def analyze_match(home_name, away_name, date_hint=None):
             status = f"⚠️ 临近停赛 ({y}/{y_threshold}黄)"
         else:
             status = "伤病"
-
         inj_list.append({
             "球队": team_cn,
             "球员": translate_player(inj["player"].get("name", "")),
@@ -992,6 +979,12 @@ def analyze_match(home_name, away_name, date_hint=None):
         "away_recent": fmt_recent(ar, aid),
         "health": health, "health_score": hscore,
         "home_cn": hcn, "away_cn": acn,
+        "rest_days_home": rest_days_home,
+        "rest_days_away": rest_days_away,
+        "schedule_coef": schedule_coef,
+        "travel_km": travel_km,
+        "travel_coef": travel_coef,
+        "eu_pressure": eu_pressure,
     }, None
 
 
@@ -1102,13 +1095,18 @@ with tab1:
                 st.session_state["cache_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 saved = 0
                 for r in results:
-                    p = calc_all_probs(r["odds"], r["coefs"], r["league_id"], st.session_state["params"], r["league_api"])
+                    p = calc_all_probs(
+                        r["odds"], r["coefs"], r["league_id"], st.session_state["params"], r["league_api"],
+                        schedule_coef=r.get("schedule_coef", 0.0),
+                        travel_coef=r.get("travel_coef", 0.0),
+                        eu_pressure=r.get("eu_pressure", 0.0),
+                    )
                     ok = save_to_db({
                         "mid": r["match_id"], "mn": r["match"], "lg": p["league_cn"],
                         "at": st.session_state["cache_time"],
                         "ho": r["odds"][0], "do": r["odds"][1], "ao": r["odds"][2],
-                        "cj": json.dumps(r["coefs"], ensure_ascii=False),
-                        "pj": json.dumps({k: v.tolist() if hasattr(v, 'tolist') else v for k, v in p.items()}, ensure_ascii=False),
+                        "cj": json.dumps(r["coefs"], ensure_ascii=False, default=str),
+                        "pj": json.dumps({k: (v.tolist() if hasattr(v, 'tolist') else v) for k, v in p.items()}, ensure_ascii=False, default=str),
                         "hs": r["health_score"],
                     })
                     if ok:
@@ -1124,7 +1122,12 @@ with tab1:
         st.subheader("📋 分析结果总览")
         for r in st.session_state["results"]:
             with st.container(border=True):
-                p = calc_all_probs(r["odds"], r["coefs"], r["league_id"], params, r["league_api"])
+                p = calc_all_probs(
+                    r["odds"], r["coefs"], r["league_id"], params, r["league_api"],
+                    schedule_coef=r.get("schedule_coef", 0.0),
+                    travel_coef=r.get("travel_coef", 0.0),
+                    eu_pressure=r.get("eu_pressure", 0.0),
+                )
                 src = p.get("model_source", "公式")
                 st.markdown(f"### {r['match']}")
                 st.caption(f"🏆 {p['league_cn']} | 概率来源：{src} → 模型{int(p['model_w']*100)}% / 市场{int(p['market_w']*100)}%")
@@ -1149,6 +1152,13 @@ with tab1:
                     st.markdown(f"**数据健康度：{r['health_score']}%**")
                     for ic, nm, dt in r["health"]:
                         st.markdown(f"- {ic} **{nm}**：{dt}")
+                    st.markdown("**扩展特征**")
+                    ecol1, ecol2, ecol3 = st.columns(3)
+                    ecol1.metric("主队休息", f"{r.get('rest_days_home', '未知')} 天")
+                    ecol2.metric("客队休息", f"{r.get('rest_days_away', '未知')} 天")
+                    tk = r.get('travel_km')
+                    ecol3.metric("旅途距离", f"{int(tk)} km" if tk else "未知")
+                    st.caption(f"赛程密度系数 {r.get('schedule_coef', 0)} | 旅途疲劳系数 {r.get('travel_coef', 0)} | 欧战压制 {r.get('eu_pressure', 0)}")
                     st.markdown("**伤停明细**")
                     if r["injuries"]:
                         st.dataframe(pd.DataFrame(r["injuries"]), hide_index=True)
@@ -1178,7 +1188,12 @@ with tab1:
         st.subheader("🎯 今日最稳二串一推荐")
         cands = []
         for r in st.session_state["results"]:
-            p = calc_all_probs(r["odds"], r["coefs"], r["league_id"], params, r["league_api"])
+            p = calc_all_probs(
+                r["odds"], r["coefs"], r["league_id"], params, r["league_api"],
+                schedule_coef=r.get("schedule_coef", 0.0),
+                travel_coef=r.get("travel_coef", 0.0),
+                eu_pressure=r.get("eu_pressure", 0.0),
+            )
             pf = p["final"]
             mxi = int(np.argmax(pf))
             if pf[mxi] > 60 and 1.30 <= r["odds"][mxi] <= 2.50 and r["health_score"] >= 80:
@@ -1254,7 +1269,7 @@ with tab2:
                             "xgb_logloss": metrics["xgb_logloss"],
                         }
                         st.session_state["model_loaded"] = True
-                        st.success(f"✅ 训练完成！样本 {metrics['samples']:,} 场，LR {metrics['lr_logloss']:.4f}，XGB {metrics['xgb_logloss']:.4f}")
+                        st.success(f"✅ 训练完成！样本 {metrics['samples']:,} 场")
                         st.rerun()
                 except Exception as e:
                     st.error(f"训练出错：{e}")
@@ -1279,7 +1294,6 @@ with tab2:
     st.subheader("⚙️ 参数调优（联赛差异化）")
     st.caption("选择【全局默认】或某个联赛，然后拖动滑块。分析时，每场比赛会用它对应联赛的参数。")
 
-    # 联赛选择器
     scope_options = ["🌐 全局默认"] + SUPPORTED_LEAGUES
     scope = st.selectbox("调参范围", scope_options, index=0)
 
@@ -1292,7 +1306,6 @@ with tab2:
         scope_params = st.session_state["params"]["by_league"][scope]
         scope_key = scope
 
-    # 显示当前差异（如果是具体联赛）
     if scope_key:
         default_w = st.session_state["params"]["default"]["weights"]
         cur_w = scope_params["weights"]
@@ -1322,20 +1335,28 @@ with tab2:
         else:
             st.success(f"✅ 合计 {tw:.2f}")
 
-    st.markdown("**② 模型融合比例**")
+    st.markdown("**② 扩展特征权重**")
+    e1, e2, e3 = st.columns(3)
+    if "extended_weights" not in params_now:
+        params_now["extended_weights"] = {"schedule": 0.5, "travel": 0.3, "eu_pressure": 0.5}
+    e1.number_input(f"{scope} · 赛程密度", 0.0, 2.0, float(params_now["extended_weights"].get("schedule", 0.5)), 0.05, key=f"sch_{scope}")
+    params_now["extended_weights"]["schedule"] = e1.number_input(f"{scope} · 赛程密度w", 0.0, 2.0, float(params_now["extended_weights"].get("schedule", 0.5)), 0.05, key=f"schw_{scope}")
+    params_now["extended_weights"]["travel"] = st.slider(f"{scope} · 旅途疲劳", 0.0, 2.0, float(params_now["extended_weights"].get("travel", 0.3)), 0.05, key=f"trv_{scope}")
+    params_now["extended_weights"]["eu_pressure"] = st.slider(f"{scope} · 欧战压制", 0.0, 2.0, float(params_now["extended_weights"].get("eu_pressure", 0.5)), 0.05, key=f"eu_{scope}")
+
+    st.markdown("**③ 模型融合比例**")
     params_now["model_fusion"]["lr"] = st.slider(f"{scope} · LR", 0.0, 1.0, params_now["model_fusion"]["lr"], 0.01, key=f"lr_{scope}")
     params_now["model_fusion"]["xgb"] = round(1 - params_now["model_fusion"]["lr"], 2)
     st.caption(f"XGB = {params_now['model_fusion']['xgb']}")
 
-    st.markdown("**③ 融合覆盖（可选）**")
-    use_ovr = st.checkbox(f"启用（忽略联赛默认比例）", value=params_now.get("market_fusion_override") is not None, key=f"ovr_{scope}")
+    st.markdown("**④ 融合覆盖（可选）**")
+    use_ovr = st.checkbox("启用（忽略联赛默认比例）", value=params_now.get("market_fusion_override") is not None, key=f"ovr_{scope}")
     if use_ovr:
         ov = st.slider(f"{scope} · 模型权重", 0.0, 1.0, params_now.get("market_fusion_override") or 0.55, 0.01, key=f"ovv_{scope}")
         params_now["market_fusion_override"] = ov
     else:
         params_now["market_fusion_override"] = None
 
-    # 写回
     if scope_key is None:
         st.session_state["params"]["default"] = params_now
     else:
@@ -1435,3 +1456,4 @@ with tab3:
                                     update_result(h["id"], res)
                                     st.success("已保存")
                                     st.rerun()
+        
