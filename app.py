@@ -407,12 +407,11 @@ def get_params_for_league(params, league_cn):
     return params["default"]
 
 
-# ============ Session State 初始化（纯字典操作，无 pickle / 无网络） ============
+# ============ Session State 初始化 ============
 if "params" not in st.session_state:
     st.session_state["params"] = get_default_params()
 elif not isinstance(st.session_state.get("params"), dict) or "by_league" not in st.session_state["params"]:
     st.session_state["params"] = get_default_params()
-
 if "param_versions" not in st.session_state:
     st.session_state["param_versions"] = []
 if "cache_time" not in st.session_state:
@@ -744,7 +743,9 @@ def softmax3(base, adjust):
 
 
 def calc_all_probs(odds, coefs, league_id, params, league_name="",
-                   schedule_coef=0.0, travel_coef=0.0, eu_pressure=0.0):
+                   schedule_coef=0.0, travel_coef=0.0, eu_pressure=0.0,
+                   model_loaded=False, model_tuple=None):
+    """注意：不访问 st.session_state，避免循环内竞态"""
     _, _, league_cn, _ = get_league_info(league_id, league_name)
     lp = get_params_for_league(params, league_cn)
     weights = lp["weights"]
@@ -757,9 +758,9 @@ def calc_all_probs(odds, coefs, league_id, params, league_name="",
         eu_pressure * ew.get("eu_pressure", 0.5))
     adjust = base_adjust + ext_adjust * 0.3
     model_used = "公式"
-    if st.session_state.get("model_loaded") and st.session_state.get("model_tuple"):
+    if model_loaded and model_tuple:
         try:
-            lr_p, xgb_p = predict_with_model(st.session_state["model_tuple"], odds)
+            lr_p, xgb_p = predict_with_model(model_tuple, odds)
             lr_p = np.array(lr_p)
             xgb_p = np.array(xgb_p)
             model_used = "真模型"
@@ -1033,45 +1034,71 @@ with tab1:
         elif not api_key:
             st.error("API Key 未配置")
         else:
+            # ★ 循环内只更新进度条，不调用 st.warning/st.success
             results = []
+            errors = []
             prog = st.progress(0)
             for i, m in enumerate(all_m):
                 prog.progress((i + 1) / len(all_m), text=f"分析中：{m}")
-                if "@" in m: mp, dp = m.rsplit("@", 1)
-                else: mp, dp = m, None
-                h, a = parse_match(mp)
-                if not h or not a:
-                    st.warning(f"无法解析：{m}")
-                    continue
-                r, err = analyze_match(h, a, dp)
-                if err: st.warning(err)
-                else: results.append(r)
+                try:
+                    if "@" in m: mp, dp = m.rsplit("@", 1)
+                    else: mp, dp = m, None
+                    h, a = parse_match(mp)
+                    if not h or not a:
+                        errors.append(f"无法解析：{m}")
+                        continue
+                    r, err = analyze_match(h, a, dp)
+                    if err:
+                        errors.append(err)
+                    else:
+                        results.append(r)
+                except Exception as ex:
+                    errors.append(f"分析 {m} 出错：{ex}")
             prog.empty()
+
+            # 循环结束后统一显示提示
+            if errors:
+                for e in errors[:20]:  # 最多显示前 20 条
+                    st.warning(e)
+                if len(errors) > 20:
+                    st.warning(f"... 还有 {len(errors) - 20} 条错误未显示")
+
             if not results:
-                st.error("分析失败")
+                st.error("所有比赛分析失败")
             else:
                 st.session_state["results"] = results
-                st.session_state["cache_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                cache_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                st.session_state["cache_time"] = cache_time
+
+                # 保存到数据库
                 saved = 0
                 for r in results:
-                    p = calc_all_probs(r["odds"], r["coefs"], r["league_id"],
-                        st.session_state["params"], r["league_api"],
-                        schedule_coef=r.get("schedule_coef", 0.0),
-                        travel_coef=r.get("travel_coef", 0.0),
-                        eu_pressure=r.get("eu_pressure", 0.0))
-                    ok = save_to_db({"mid": r["match_id"], "mn": r["match"], "lg": p["league_cn"],
-                        "at": st.session_state["cache_time"],
-                        "ho": r["odds"][0], "do": r["odds"][1], "ao": r["odds"][2],
-                        "cj": json.dumps(r["coefs"], ensure_ascii=False, default=str),
-                        "pj": json.dumps({k: (v.tolist() if hasattr(v, 'tolist') else v) for k, v in p.items()}, ensure_ascii=False, default=str),
-                        "hs": r["health_score"]})
-                    if ok: saved += 1
+                    try:
+                        p = calc_all_probs(
+                            r["odds"], r["coefs"], r["league_id"],
+                            st.session_state["params"], r["league_api"],
+                            schedule_coef=r.get("schedule_coef", 0.0),
+                            travel_coef=r.get("travel_coef", 0.0),
+                            eu_pressure=r.get("eu_pressure", 0.0),
+                            model_loaded=st.session_state.get("model_loaded", False),
+                            model_tuple=st.session_state.get("model_tuple"))
+                        ok = save_to_db({"mid": r["match_id"], "mn": r["match"], "lg": p["league_cn"],
+                            "at": cache_time,
+                            "ho": r["odds"][0], "do": r["odds"][1], "ao": r["odds"][2],
+                            "cj": json.dumps(r["coefs"], ensure_ascii=False, default=str),
+                            "pj": json.dumps({k: (v.tolist() if hasattr(v, 'tolist') else v) for k, v in p.items()}, ensure_ascii=False, default=str),
+                            "hs": r["health_score"]})
+                        if ok: saved += 1
+                    except Exception as ex:
+                        errors.append(f"保存 {r.get('match','')} 失败：{ex}")
                 st.success(f"分析完成！共 {len(results)} 场，已存库 {saved} 场")
 
     if "results" in st.session_state:
         if st.session_state.get("cache_time"):
             st.caption(f"⏱️ 数据缓存于 {st.session_state['cache_time']}")
         params = st.session_state["params"]
+        model_loaded = st.session_state.get("model_loaded", False)
+        model_tuple = st.session_state.get("model_tuple")
         st.markdown("---")
         st.subheader("📋 分析结果总览")
         for r in st.session_state["results"]:
@@ -1079,7 +1106,8 @@ with tab1:
                 p = calc_all_probs(r["odds"], r["coefs"], r["league_id"], params, r["league_api"],
                     schedule_coef=r.get("schedule_coef", 0.0),
                     travel_coef=r.get("travel_coef", 0.0),
-                    eu_pressure=r.get("eu_pressure", 0.0))
+                    eu_pressure=r.get("eu_pressure", 0.0),
+                    model_loaded=model_loaded, model_tuple=model_tuple)
                 src = p.get("model_source", "公式")
                 st.markdown(f"### {r['match']}")
                 st.caption(f"🏆 {p['league_cn']} | 概率来源：{src} → 模型{int(p['model_w']*100)}% / 市场{int(p['market_w']*100)}%")
@@ -1169,7 +1197,8 @@ with tab1:
             p = calc_all_probs(r["odds"], r["coefs"], r["league_id"], params, r["league_api"],
                 schedule_coef=r.get("schedule_coef", 0.0),
                 travel_coef=r.get("travel_coef", 0.0),
-                eu_pressure=r.get("eu_pressure", 0.0))
+                eu_pressure=r.get("eu_pressure", 0.0),
+                model_loaded=model_loaded, model_tuple=model_tuple)
             pf = p["final"]
             mxi = int(np.argmax(pf))
             if pf[mxi] > 60 and 1.30 <= r["odds"][mxi] <= 2.50 and r["health_score"] >= 80:
