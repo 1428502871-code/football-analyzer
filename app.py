@@ -16,29 +16,23 @@ BASE_URL = "https://v3.football.api-sports.io"
 WEIGHTS = {"injury": 0.20, "home_away": 0.20, "h2h": 0.18, "form": 0.21, "motivation": 0.21}
 
 # ============ 联赛ID → 融合比例映射 ============
-# 键是 API-Football 的联赛 ID，值 = (模型权重, 市场权重, 联赛中文名, 类别)
 LEAGUE_MAP = {
-    # 五大联赛
     39:  (0.65, 0.35, "英超", "顶级"),
     140: (0.55, 0.45, "西甲", "顶级"),
     78:  (0.65, 0.35, "德甲", "顶级"),
     135: (0.65, 0.35, "意甲", "顶级"),
     61:  (0.55, 0.45, "法甲", "顶级"),
-    # 欧战
     2:   (0.70, 0.30, "欧冠", "欧战"),
     3:   (0.70, 0.30, "欧联", "欧战"),
     848: (0.70, 0.30, "欧协联", "欧战"),
-    # 二级联赛
     40:  (0.55, 0.45, "英冠", "普通"),
     79:  (0.55, 0.45, "德乙", "普通"),
     141: (0.55, 0.45, "西乙", "普通"),
     62:  (0.55, 0.45, "法乙", "普通"),
-    # 其他欧洲一级
     88:  (0.55, 0.45, "荷甲", "普通"),
     94:  (0.55, 0.45, "葡超", "普通"),
     144: (0.55, 0.45, "比甲", "普通"),
     179: (0.55, 0.45, "苏超", "普通"),
-    # 北欧
     103: (0.55, 0.45, "挪超", "普通"),
     113: (0.55, 0.45, "瑞超", "普通"),
     119: (0.55, 0.45, "丹超", "普通"),
@@ -46,17 +40,81 @@ LEAGUE_MAP = {
 }
 
 def get_league_info(league_id, league_name_from_api=""):
-    """根据联赛ID匹配融合比例，未收录则归为普通联赛"""
     if league_id in LEAGUE_MAP:
         model_w, market_w, cn_name, cat = LEAGUE_MAP[league_id]
         return model_w, market_w, cn_name, cat
     return 0.55, 0.45, league_name_from_api or "未知联赛", "普通"
 
+# ============ 中文队名 → 英文队名 映射表 ============
+CN_TEAM_MAP = {
+    "阿森纳": "Arsenal", "切尔西": "Chelsea", "曼城": "Man City", "曼彻斯特城": "Man City",
+    "曼联": "Man United", "曼彻斯特联": "Man United", "利物浦": "Liverpool",
+    "热刺": "Tottenham", "托特纳姆": "Tottenham", "纽卡斯尔": "Newcastle",
+    "阿斯顿维拉": "Aston Villa", "布莱顿": "Brighton", "西汉姆": "West Ham",
+    "西汉姆联": "West Ham", "埃弗顿": "Everton", "富勒姆": "Fulham",
+    "水晶宫": "Crystal Palace", "布伦特福德": "Brentford", "狼队": "Wolves",
+    "诺丁汉森林": "Nottingham Forest", "伯恩茅斯": "Bournemouth",
+    "莱斯特城": "Leicester", "南安普顿": "Southampton", "伊普斯维奇": "Ipswich",
+    "皇马": "Real Madrid", "皇家马德里": "Real Madrid", "巴萨": "Barcelona",
+    "巴塞罗那": "Barcelona", "马竞": "Atletico Madrid", "马德里竞技": "Atletico Madrid",
+    "塞维利亚": "Sevilla", "毕尔巴鄂": "Athletic Bilbao", "皇家社会": "Real Sociedad",
+    "皇家贝蒂斯": "Real Betis", "贝蒂斯": "Real Betis", "比利亚雷亚尔": "Villarreal",
+    "瓦伦西亚": "Valencia", "赫罗纳": "Girona", "塞尔塔": "Celta Vigo",
+    "拉科鲁尼亚": "Deportivo", "莱万特": "Levante", "西班牙人": "Espanyol",
+    "赫塔菲": "Getafe", "巴列卡诺": "Rayo Vallecano", "奥萨苏纳": "Osasuna",
+    "拜仁": "Bayern Munich", "拜仁慕尼黑": "Bayern Munich", "多特": "Dortmund",
+    "多特蒙德": "Dortmund", "莱比锡": "RB Leipzig", "勒沃库森": "Bayer Leverkusen",
+    "法兰克福": "Eintracht Frankfurt", "斯图加特": "Stuttgart",
+    "沃尔夫斯堡": "Wolfsburg", "门兴": "Monchengladbach", "不莱梅": "Werder Bremen",
+    "弗赖堡": "Freiburg", "霍芬海姆": "Hoffenheim", "美因茨": "Mainz",
+    "奥格斯堡": "Augsburg", "柏林联合": "Union Berlin", "波鸿": "Bochum",
+    "海登海姆": "Heidenheim", "圣保利": "St Pauli", "荷尔斯泰因": "Holstein Kiel",
+    "尤文": "Juventus", "尤文图斯": "Juventus", "国米": "Inter",
+    "国际米兰": "Inter", "AC米兰": "AC Milan", "米兰": "AC Milan",
+    "那不勒斯": "Napoli", "罗马": "Roma", "拉齐奥": "Lazio",
+    "亚特兰大": "Atalanta", "佛罗伦萨": "Fiorentina", "博洛尼亚": "Bologna",
+    "都灵": "Torino", "乌迪内斯": "Udinese", "热那亚": "Genoa",
+    "卡利亚里": "Cagliari", "莱切": "Lecce", "维罗纳": "Verona",
+    "萨索洛": "Sassuolo", "恩波利": "Empoli", "蒙扎": "Monza", "科莫": "Como",
+    "巴黎": "PSG", "巴黎圣日耳曼": "PSG", "马赛": "Marseille", "里昂": "Lyon",
+    "摩纳哥": "Monaco", "尼斯": "Nice", "里尔": "Lille", "朗斯": "Lens",
+    "雷恩": "Rennes", "斯特拉斯堡": "Strasbourg", "图卢兹": "Toulouse",
+    "南特": "Nantes", "兰斯": "Reims", "布雷斯特": "Brest",
+    "蒙彼利埃": "Montpellier", "勒阿弗尔": "Le Havre", "欧塞尔": "Auxerre",
+    "昂热": "Angers", "圣埃蒂安": "Saint-Etienne",
+    "阿贾克斯": "Ajax", "埃因霍温": "PSV", "费耶诺德": "Feyenoord",
+    "波尔图": "Porto", "本菲卡": "Benfica", "里斯本竞技": "Sporting CP",
+    "凯尔特人": "Celtic", "流浪者": "Rangers",
+    "罗森博格": "Rosenborg", "莫尔德": "Molde", "博多闪耀": "Bodo Glimt",
+    "马尔默": "Malmo", "哥本哈根": "Copenhagen", "北西兰": "Nordsjaelland",
+    "加拉塔萨雷": "Galatasaray", "费内巴切": "Fenerbahce",
+    "顿涅茨克矿工": "Shakhtar", "萨尔茨堡": "Salzburg",
+    "布鲁日": "Club Brugge", "年轻人": "Young Boys",
+}
+
+def cn_to_en(name):
+    name = name.strip()
+    return CN_TEAM_MAP.get(name, name)
+
 # ============ API 调用函数 ============
+@st.cache_data(ttl=600)
+def search_fixtures_by_date(date_str):
+    """搜索指定日期的比赛，只保留支持的联赛"""
+    try:
+        r = requests.get(f"{BASE_URL}/fixtures", headers=HEADERS,
+                         params={"date": date_str, "timezone": "Asia/Shanghai"}, timeout=15)
+        data = r.json()
+        fixtures = data.get("response", [])
+        filtered = [f for f in fixtures if f["league"]["id"] in LEAGUE_MAP]
+        return filtered
+    except Exception:
+        return []
+
 @st.cache_data(ttl=1800)
 def search_team(name):
+    en_name = cn_to_en(name)
     try:
-        r = requests.get(f"{BASE_URL}/teams", headers=HEADERS, params={"search": name}, timeout=10)
+        r = requests.get(f"{BASE_URL}/teams", headers=HEADERS, params={"search": en_name}, timeout=10)
         data = r.json()
         if data.get("response"):
             t = data["response"][0]["team"]
@@ -138,39 +196,36 @@ def calc_injury_coef(injuries, home_id, away_id):
         elif t_id == away_id:
             a_score += w
     diff = a_score - h_score
-    coef = np.tanh(diff / 3.0)
-    return round(coef, 2), h_score, a_score
+    return round(np.tanh(diff / 3.0), 2), h_score, a_score
 
 def calc_h2h_coef(h2h_matches, home_id):
     decay = [1.0, 0.7, 0.5, 0.3, 0.2]
     score = 0
     for i, m in enumerate(h2h_matches[:5]):
         w = decay[i] if i < len(decay) else 0.1
-        h_score = m["goals"]["home"] or 0
-        a_score = m["goals"]["away"] or 0
+        h_s = m["goals"]["home"] or 0
+        a_s = m["goals"]["away"] or 0
         if m["teams"]["home"]["id"] == home_id:
-            score += w * (1 if h_score > a_score else (-1 if h_score < a_score else 0))
+            score += w * (1 if h_s > a_s else (-1 if h_s < a_s else 0))
         else:
-            score += w * (1 if a_score > h_score else (-1 if a_score < h_score else 0))
-    coef = np.tanh(score / 3.0)
-    return round(coef, 2)
+            score += w * (1 if a_s > h_s else (-1 if a_s < h_s else 0))
+    return round(np.tanh(score / 3.0), 2)
 
 def calc_form_coef(recent, team_id):
     score = 0
     for m in recent:
-        h_score = m["goals"]["home"] or 0
-        a_score = m["goals"]["away"] or 0
+        h_s = m["goals"]["home"] or 0
+        a_s = m["goals"]["away"] or 0
         if m["teams"]["home"]["id"] == team_id:
-            score += (3 if h_score > a_score else (1 if h_score == a_score else 0))
+            score += (3 if h_s > a_s else (1 if h_s == a_s else 0))
         else:
-            score += (3 if a_score > h_score else (1 if a_score == h_score else 0))
+            score += (3 if a_s > h_s else (1 if a_s == h_s else 0))
     return score
 
 def calc_form_diff(home_recent, away_recent, home_id, away_id):
     h = calc_form_coef(home_recent, home_id)
     a = calc_form_coef(away_recent, away_id)
-    coef = np.tanh((h - a) / 9.0)
-    return round(coef, 2)
+    return round(np.tanh((h - a) / 9.0), 2)
 
 # ============ 概率计算 ============
 def devig(odds):
@@ -184,118 +239,165 @@ def softmax3(base, adjust):
     return e / e.sum()
 
 def calc_all_probs(odds, coefs, league_id, league_name=""):
-    """自动识别联赛，计算五层概率"""
     market_p = devig(odds)
     adjust = sum(coefs[k] * WEIGHTS[k] for k in WEIGHTS)
-    
     lr_p = softmax3(market_p, adjust * 0.5)
     xgb_p = softmax3(market_p, adjust * 1.0)
     model_p = 0.45 * lr_p + 0.55 * xgb_p
-    
-    # 自动识别联赛，匹配融合比例
     model_w, market_w, cn_name, cat = get_league_info(league_id, league_name)
     final_p = model_w * model_p + market_w * np.array(market_p)
     final_p = final_p / final_p.sum()
-    
     return {
-        "lr": (lr_p * 100).round(1),
-        "xgb": (xgb_p * 100).round(1),
-        "model": (model_p * 100).round(1),
-        "market": (np.array(market_p) * 100).round(1),
+        "lr": (lr_p * 100).round(1), "xgb": (xgb_p * 100).round(1),
+        "model": (model_p * 100).round(1), "market": (np.array(market_p) * 100).round(1),
         "final": (final_p * 100).round(1),
-        "league_cn": cn_name,
-        "model_w": model_w,
-        "market_w": market_w
+        "league_cn": cn_name, "model_w": model_w, "market_w": market_w
     }
 
-# ============ 主流程 ============
-st.subheader("📊 批量输入比赛")
-st.caption("支持多联赛混合输入，系统会自动识别每场比赛的联赛性质并匹配对应融合比例。")
+# ============ 分析单场比赛（复用函数） ============
+def analyze_match(home_name, away_name):
+    home_id, home_std = search_team(home_name)
+    away_id, away_std = search_team(away_name)
+    if not home_id or not away_id:
+        return None, f"球队搜索失败：{home_name} / {away_name}"
+    
+    fixture = None
+    for offset in range(0, 4):
+        d = (datetime.now() + timedelta(days=offset)).strftime("%Y-%m-%d")
+        fixture = get_fixture(home_id, away_id, d)
+        if fixture:
+            break
+    if not fixture:
+        return None, f"未找到近期比赛：{home_std} vs {away_std}"
+    
+    fid = fixture["fixture"]["id"]
+    league_id = fixture["league"]["id"]
+    league_name_api = fixture["league"]["name"]
+    league_country = fixture["league"].get("country", "")
+    
+    h_odd, d_odd, a_odd = get_odds(fid)
+    if not h_odd:
+        return None, f"未找到赔率：{home_std} vs {away_std}"
+    
+    injuries = get_injuries(fid)
+    h2h = get_h2h(home_id, away_id)
+    h_recent = get_recent_form(home_id)
+    a_recent = get_recent_form(away_id)
+    
+    inj_coef, _, _ = calc_injury_coef(injuries, home_id, away_id)
+    h2h_coef = calc_h2h_coef(h2h, home_id)
+    form_coef = calc_form_diff(h_recent, a_recent, home_id, away_id)
+    coefs = {"injury": inj_coef, "home_away": 0.3, "h2h": h2h_coef, "form": form_coef, "motivation": 0.0}
+    
+    probs = calc_all_probs([h_odd, d_odd, a_odd], coefs, league_id, league_name_api)
+    
+    return {
+        "match": f"{home_std} vs {away_std}",
+        "league_api": league_name_api, "league_country": league_country,
+        "league_id": league_id, "league_cn": probs["league_cn"],
+        "odds": (h_odd, d_odd, a_odd), "coefs": coefs, "probs": probs,
+    }, None
+
+# ================================================================
+# ============ 界面：按日期搜索模块（新增） ============
+# ================================================================
+st.subheader("📅 按日期搜索当日比赛")
+st.caption("搜索指定日期、系统支持的所有联赛比赛，勾选后加入分析列表。")
+
+col_a, col_b = st.columns([2, 1])
+with col_a:
+    search_date = st.date_input("选择日期", value=datetime.now().date())
+with col_b:
+    st.write("")
+    st.write("")
+    if st.button("🔍 搜索当日比赛"):
+        with st.spinner("正在搜索..."):
+            fixtures = search_fixtures_by_date(search_date.strftime("%Y-%m-%d"))
+            st.session_state["date_fixtures"] = fixtures
+            st.session_state["date_fixtures_date"] = search_date.strftime("%Y-%m-%d")
+
+if "date_fixtures" in st.session_state:
+    fixtures = st.session_state["date_fixtures"]
+    if not fixtures:
+        st.warning(f"未找到 {st.session_state.get('date_fixtures_date', '')} 当天支持的联赛比赛")
+    else:
+        st.success(f"共找到 {len(fixtures)} 场支持的联赛比赛（{st.session_state.get('date_fixtures_date', '')}）")
+        
+        # 构建选项
+        options = []
+        opt_to_match = {}
+        for f in fixtures:
+            home = f["teams"]["home"]["name"]
+            away = f["teams"]["away"]["name"]
+            lid = f["league"]["id"]
+            league_cn = LEAGUE_MAP[lid][2]
+            time_str = f["fixture"]["date"][11:16]
+            opt = f"[{league_cn}] {home} vs {away} ({time_str})"
+            options.append(opt)
+            opt_to_match[opt] = f"{home} {away}"
+        
+        selected = st.multiselect("勾选要分析的比赛（可多选，含中英文队名均可）", options)
+        
+        col_c, col_d = st.columns(2)
+        with col_c:
+            if st.button("➕ 加入分析列表"):
+                if "selected_matches" not in st.session_state:
+                    st.session_state["selected_matches"] = []
+                added = 0
+                for opt in selected:
+                    match_str = opt_to_match.get(opt)
+                    if match_str and match_str not in st.session_state["selected_matches"]:
+                        st.session_state["selected_matches"].append(match_str)
+                        added += 1
+                st.success(f"成功加入 {added} 场")
+                st.rerun()
+        with col_d:
+            if st.button("🗑️ 清空已加入"):
+                st.session_state["selected_matches"] = []
+                st.rerun()
+        
+        if st.session_state.get("selected_matches"):
+            st.info(f"📋 当前待分析列表：{len(st.session_state['selected_matches'])} 场")
+            with st.expander("查看已加入的比赛"):
+                for i, m in enumerate(st.session_state["selected_matches"], 1):
+                    st.write(f"{i}. {m}")
+
+# ================================================================
+# ============ 手动输入 + 开始分析 ============
+# ================================================================
+st.markdown("---")
+st.subheader("📊 手动输入或确认分析列表")
 match_input = st.text_input(
-    "自由格式，用逗号分隔（请使用英文队名，例如：Arsenal Chelsea, Real Madrid Barcelona, Man City Burnley）",
+    "自由格式，用逗号分隔（例如：阿森纳 切尔西, 皇马 巴萨）",
     ""
 )
 
-if st.button("开始批量分析", type="primary"):
-    if not match_input:
-        st.warning("请输入比赛")
+if st.button("🚀 开始批量分析", type="primary"):
+    all_matches = []
+    if match_input:
+        all_matches.extend([m.strip() for m in match_input.split(",") if m.strip()])
+    if st.session_state.get("selected_matches"):
+        all_matches.extend(st.session_state["selected_matches"])
+    # 去重保序
+    all_matches = list(dict.fromkeys(all_matches))
+    
+    if not all_matches:
+        st.warning("请手动输入比赛，或从日期搜索结果中勾选添加")
     elif not api_key:
         st.error("API Key 未配置")
     else:
-        matches = [m.strip() for m in match_input.split(",") if m.strip()]
         results = []
-        
         progress = st.progress(0)
-        for i, m in enumerate(matches):
-            progress.progress((i + 1) / len(matches), text=f"正在分析：{m}")
-            parts = m.replace("vs", "").replace("VS", "").split()
+        for i, m in enumerate(all_matches):
+            progress.progress((i + 1) / len(all_matches), text=f"正在分析：{m}")
+            parts = m.replace("vs", "").replace("VS", "").replace("对", " ").split()
             if len(parts) < 2:
-                st.warning(f"无法解析：{m}")
                 continue
-            home_name, away_name = parts[0], parts[1]
-            
-            home_id, home_std = search_team(home_name)
-            away_id, away_std = search_team(away_name)
-            if not home_id or not away_id:
-                st.warning(f"球队搜索失败：{m}")
-                continue
-            
-            fixture = None
-            for offset in range(0, 4):
-                d = (datetime.now() + timedelta(days=offset)).strftime("%Y-%m-%d")
-                fixture = get_fixture(home_id, away_id, d)
-                if fixture:
-                    break
-            
-            if not fixture:
-                st.warning(f"未找到近期比赛：{home_std} vs {away_std}")
-                continue
-            
-            fid = fixture["fixture"]["id"]
-            league_id = fixture["league"]["id"]
-            league_name_api = fixture["league"]["name"]
-            league_country = fixture["league"].get("country", "")
-            
-            h_odd, d_odd, a_odd = get_odds(fid)
-            if not h_odd:
-                st.warning(f"未找到赔率数据：{home_std} vs {away_std}（联赛：{league_name_api}）")
-                continue
-            
-            injuries = get_injuries(fid)
-            h2h = get_h2h(home_id, away_id)
-            h_recent = get_recent_form(home_id)
-            a_recent = get_recent_form(away_id)
-            
-            inj_coef, h_inj, a_inj = calc_injury_coef(injuries, home_id, away_id)
-            h2h_coef = calc_h2h_coef(h2h, home_id)
-            form_coef = calc_form_diff(h_recent, a_recent, home_id, away_id)
-            home_away_coef = 0.3
-            motivation_coef = 0.0
-            
-            coefs = {
-                "injury": inj_coef,
-                "home_away": home_away_coef,
-                "h2h": h2h_coef,
-                "form": form_coef,
-                "motivation": motivation_coef
-            }
-            
-            # 自动识别联赛并计算
-            probs = calc_all_probs([h_odd, d_odd, a_odd], coefs, league_id, league_name_api)
-            
-            results.append({
-                "match": f"{home_std} vs {away_std}",
-                "league_api": league_name_api,
-                "league_country": league_country,
-                "league_id": league_id,
-                "league_cn": probs["league_cn"],
-                "odds": (h_odd, d_odd, a_odd),
-                "coefs": coefs,
-                "probs": probs,
-                "injuries": injuries,
-                "h2h": h2h,
-            })
-        
+            r, err = analyze_match(parts[0], parts[1])
+            if err:
+                st.warning(err)
+            else:
+                results.append(r)
         progress.empty()
         
         if not results:
@@ -312,7 +414,6 @@ if "results" in st.session_state:
     for r in st.session_state["results"]:
         with st.container(border=True):
             p = r["probs"]
-            # 显示联赛识别信息
             st.markdown(f"### {r['match']}")
             st.caption(f"🏆 联赛识别：**{r['league_cn']}** (API: {r['league_api']} · {r['league_country']}) → 融合比例 模型{int(p['model_w']*100)}% / 市场{int(p['market_w']*100)}%")
             
@@ -329,10 +430,8 @@ if "results" in st.session_state:
                     "平局": [f"{p['lr'][1]}%", f"{p['xgb'][1]}%", f"{p['model'][1]}%", f"{p['market'][1]}%", f"**{p['final'][1]}%**"],
                     "客胜": [f"{p['lr'][2]}%", f"{p['xgb'][2]}%", f"{p['model'][2]}%", f"{p['market'][2]}%", f"**{p['final'][2]}%**"],
                 }), hide_index=True)
-                
                 st.markdown("**五项系数**")
                 st.json(r["coefs"])
-                
                 st.markdown(f"**赔率（Pinnacle）**：主 {r['odds'][0]} / 平 {r['odds'][1]} / 客 {r['odds'][2]}")
                 st.caption(f"数据抓取时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
@@ -350,12 +449,9 @@ if "results" in st.session_state:
             market_p = r["probs"]["market"]
             if max_p - market_p[max_idx] >= 0:
                 candidates.append({
-                    "match": r["match"],
-                    "league": r["league_cn"],
+                    "match": r["match"], "league": r["league_cn"],
                     "pick": ["主胜", "平局", "客胜"][max_idx],
-                    "prob": max_p,
-                    "odd": odd,
-                    "ev": (max_p / 100) * odd - 1
+                    "prob": max_p, "odd": odd
                 })
     
     best_combo = None
