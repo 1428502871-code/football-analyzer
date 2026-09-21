@@ -4,8 +4,8 @@ import os
 import requests
 import numpy as np
 
-st.set_page_config(page_title="足球分析模型 - 真实分析", layout="wide", page_icon="⚽")
-st.title("⚽ 足球分析模型 - 真实数据分析")
+st.set_page_config(page_title="足球分析模型 - 真实分析", layout="wide", page_icon="?")
+st.title("? 足球分析模型 - 真实数据分析")
 
 api_key = os.environ.get("API_FOOTBALL_KEY", "")
 
@@ -63,7 +63,7 @@ if st.button("开始真实分析", type="primary"):
             market_p = norm(market_probs)
             final_p = norm(final_probs)
 
-            st.markdown("### 📊 五层胜率对比")
+            st.markdown("### ?? 五层胜率对比")
             df_probs = pd.DataFrame({
                 "层级": ["逻辑回归", "XGBoost", "模型融合 (LR45+XGB55)", "市场去水", "最终融合 (模型65%+市场35%)"],
                 "主胜": [f"{lr_p[0]}%", f"{xgb_p[0]}%", f"{model_p[0]}%", f"{market_p[0]}%", f"**{final_p[0]}%**"],
@@ -72,6 +72,6 @@ if st.button("开始真实分析", type="primary"):
             })
             st.dataframe(df_probs, hide_index=True)
 
-            st.markdown("### 🔍 五项系数依据")
+            st.markdown("### ?? 五项系数依据")
             st.json(coef)
             st.caption("注：当前为逻辑跑通阶段，真实API解析代码正在下个版本接入。")
