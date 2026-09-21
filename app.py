@@ -37,7 +37,6 @@ LEAGUE_CODE_MAP = {
 }
 TRAINING_SEASONS = ["2223", "2324", "2425"]
 
-# 各联赛累积黄牌停赛阈值
 YELLOW_THRESHOLD = {
     "英超": 5, "英冠": 5, "西甲": 5, "西乙": 5,
     "德甲": 5, "德乙": 5, "意甲": 5, "意乙": 5,
@@ -45,6 +44,20 @@ YELLOW_THRESHOLD = {
     "比甲": 5, "苏超": 6, "挪超": 4, "瑞超": 3,
     "丹超": 4, "芬超": 4,
 }
+
+# 所有支持联赛的中文名列表
+SUPPORTED_LEAGUES = list(dict.fromkeys([v[2] for v in {
+    39:  (0, 0, "英超", ""), 140: (0, 0, "西甲", ""),
+    78:  (0, 0, "德甲", ""), 135: (0, 0, "意甲", ""),
+    61:  (0, 0, "法甲", ""), 2:   (0, 0, "欧冠", ""),
+    3:   (0, 0, "欧联", ""), 848: (0, 0, "欧协联", ""),
+    40:  (0, 0, "英冠", ""), 79:  (0, 0, "德乙", ""),
+    141: (0, 0, "西乙", ""), 62:  (0, 0, "法乙", ""),
+    88:  (0, 0, "荷甲", ""), 94:  (0, 0, "葡超", ""),
+    144: (0, 0, "比甲", ""), 179: (0, 0, "苏超", ""),
+    103: (0, 0, "挪超", ""), 113: (0, 0, "瑞超", ""),
+    119: (0, 0, "丹超", ""), 108: (0, 0, "芬超", ""),
+}.values()]))
 
 
 def get_db_engine():
@@ -220,7 +233,6 @@ def download_league_csv(league_cn, seasons=TRAINING_SEASONS):
 
 
 def preprocess_df(df):
-    """提取特征：赔率去水 + 赔率漂移（容错版）"""
     needed = ['B365H', 'B365D', 'B365A', 'FTHG', 'FTAG']
     for c in needed:
         if c not in df.columns:
@@ -369,7 +381,8 @@ def current_season():
     return now.year if now.month >= 7 else now.year - 1
 
 
-def get_default_params():
+# ============ 参数体系（包三核心：联赛差异化） ============
+def _base_params():
     return {
         "weights": {"injury": 0.20, "home_away": 0.20, "h2h": 0.18, "form": 0.21, "motivation": 0.21},
         "model_fusion": {"lr": 0.45, "xgb": 0.55},
@@ -377,8 +390,59 @@ def get_default_params():
     }
 
 
+def get_default_params():
+    """返回带联赛差异化结构的完整参数"""
+    default = _base_params()
+    by_league = {}
+
+    # 所有支持联赛默认继承 base
+    for lg in SUPPORTED_LEAGUES:
+        by_league[lg] = copy.deepcopy(default)
+
+    # ===== 联赛差异化的初始值（可后续在 UI 中调） =====
+    # 英超：伤停权重高（联赛竞争激烈）
+    by_league["英超"]["weights"] = {"injury": 0.22, "home_away": 0.20, "h2h": 0.15, "form": 0.22, "motivation": 0.21}
+    # 德甲：状态权重高（球队波动大）
+    by_league["德甲"]["weights"] = {"injury": 0.20, "home_away": 0.20, "h2h": 0.15, "form": 0.24, "motivation": 0.21}
+    # 意甲：战意权重高（中游球队战意差异大）
+    by_league["意甲"]["weights"] = {"injury": 0.21, "home_away": 0.19, "h2h": 0.16, "form": 0.21, "motivation": 0.23}
+    # 西甲：H2H 重要（同城德比多）
+    by_league["西甲"]["weights"] = {"injury": 0.19, "home_away": 0.20, "h2h": 0.20, "form": 0.21, "motivation": 0.20}
+    # 法甲：主客场差异相对小（联赛整体保守）
+    by_league["法甲"]["weights"] = {"injury": 0.21, "home_away": 0.18, "h2h": 0.17, "form": 0.22, "motivation": 0.22}
+    # 挪超：主客场差异大（长途+人工草皮）
+    by_league["挪超"]["weights"] = {"injury": 0.18, "home_away": 0.28, "h2h": 0.15, "form": 0.22, "motivation": 0.17}
+    # 瑞超：同挪超
+    by_league["瑞超"]["weights"] = {"injury": 0.18, "home_away": 0.28, "h2h": 0.15, "form": 0.22, "motivation": 0.17}
+    # 丹超：主客场差异大
+    by_league["丹超"]["weights"] = {"injury": 0.19, "home_away": 0.26, "h2h": 0.15, "form": 0.22, "motivation": 0.18}
+    # 芬超：主客场差异大，H2H 意义弱
+    by_league["芬超"]["weights"] = {"injury": 0.18, "home_away": 0.28, "h2h": 0.13, "form": 0.23, "motivation": 0.18}
+    # 欧战：伤停权重高（强强对话，核心球员更重要），市场融合已经 0.70 在 LEAGUE_MAP 里
+    by_league["欧冠"]["weights"] = {"injury": 0.24, "home_away": 0.18, "h2h": 0.18, "form": 0.22, "motivation": 0.18}
+    by_league["欧联"]["weights"] = {"injury": 0.22, "home_away": 0.19, "h2h": 0.18, "form": 0.23, "motivation": 0.18}
+    by_league["欧协联"]["weights"] = {"injury": 0.22, "home_away": 0.19, "h2h": 0.18, "form": 0.23, "motivation": 0.18}
+
+    return {"default": default, "by_league": by_league}
+
+
+def get_params_for_league(params, league_cn):
+    """取该联赛的参数，没有就用 default"""
+    if not isinstance(params, dict) or "by_league" not in params:
+        # 兼容旧结构，直接返回
+        return params if "weights" in params else _base_params()
+    if league_cn in params["by_league"]:
+        return params["by_league"][league_cn]
+    return params["default"]
+
+
 if "params" not in st.session_state:
     st.session_state["params"] = get_default_params()
+else:
+    # 兼容旧结构：检测到没有 by_league 就重新初始化
+    if not isinstance(st.session_state["params"], dict) or "by_league" not in st.session_state["params"]:
+        st.session_state["params"] = get_default_params()
+
 if "param_versions" not in st.session_state:
     st.session_state["param_versions"] = []
 if "cache_time" not in st.session_state:
@@ -602,7 +666,6 @@ def get_injuries(fixture_id):
 
 @st.cache_data(ttl=86400)
 def get_player_stats(player_id):
-    """获取球员赛季统计：位置、出场、黄牌、红牌"""
     try:
         r = requests.get(f"{BASE_URL}/players", headers=HEADERS,
                          params={"id": player_id, "season": current_season()}, timeout=10)
@@ -714,9 +777,13 @@ def softmax3(base, adjust):
 
 
 def calc_all_probs(odds, coefs, league_id, params, league_name=""):
-    weights = params["weights"]
-    mf = params["model_fusion"]
-    override = params.get("market_fusion_override")
+    """按联赛取对应参数"""
+    _, _, league_cn, _ = get_league_info(league_id, league_name)
+    league_params = get_params_for_league(params, league_cn)
+
+    weights = league_params["weights"]
+    mf = league_params["model_fusion"]
+    override = league_params.get("market_fusion_override")
 
     market_p = np.array(devig(odds))
     adjust = sum(coefs[k] * weights[k] for k in weights)
@@ -741,9 +808,8 @@ def calc_all_probs(odds, coefs, league_id, params, league_name=""):
 
     if override is not None:
         mw, mkw = override, 1 - override
-        _, _, cn, _ = get_league_info(league_id, league_name)
     else:
-        mw, mkw, cn, _ = get_league_info(league_id, league_name)
+        mw, mkw, _, _ = get_league_info(league_id, league_name)
 
     final_p = mw * model_p + mkw * market_p
     final_p = final_p / final_p.sum()
@@ -751,7 +817,7 @@ def calc_all_probs(odds, coefs, league_id, params, league_name=""):
         "lr": (lr_p * 100).round(1), "xgb": (xgb_p * 100).round(1),
         "model": (model_p * 100).round(1), "market": (market_p * 100).round(1),
         "final": (final_p * 100).round(1),
-        "league_cn": cn, "model_w": mw, "market_w": mkw,
+        "league_cn": league_cn, "model_w": mw, "market_w": mkw,
         "model_source": model_used,
     }
 
@@ -858,7 +924,6 @@ def analyze_match(home_name, away_name, date_hint=None):
     hcn = en_to_cn(hs)
     acn = en_to_cn(as_)
 
-    # 停赛阈值（按联赛）
     _, _, league_cn_tmp, _ = get_league_info(lid, lname)
     y_threshold = YELLOW_THRESHOLD.get(league_cn_tmp, 5)
 
@@ -877,7 +942,6 @@ def analyze_match(home_name, away_name, date_hint=None):
         rr = stats.get("red", 0)
         reason_lower = (inj["player"].get("reason") or inj.get("type") or "").lower()
 
-        # 判断停赛状态
         if "red" in reason_lower or rr > 0:
             status = "🔴 红牌停赛"
         elif "yellow" in reason_lower or "suspended" in reason_lower:
@@ -1168,17 +1232,17 @@ with tab2:
         c2.metric("LR LogLoss", f"{meta.get('lr_logloss', 0):.4f}")
         c3.metric("XGB LogLoss", f"{meta.get('xgb_logloss', 0):.4f}")
     else:
-        st.warning("⚠️ 尚未加载模型。当前分析使用'公式模式'（市场概率 + 五项系数）。")
-        st.caption("点击下方【🚀 一键学习】拉取 football-data.co.uk 历史数据训练真模型。")
+        st.warning("⚠️ 尚未加载模型。当前分析使用'公式模式'。")
+        st.caption("点击【🚀 一键学习】训练真模型。")
 
     col_a, col_b = st.columns(2)
     with col_a:
         if st.button("🚀 一键学习", type="primary"):
-            with st.spinner("正在下载历史数据并训练模型，大约需要 1-3 分钟..."):
+            with st.spinner("正在下载历史数据并训练模型..."):
                 try:
                     result, metrics = run_full_training()
                     if result is None:
-                        st.error("训练失败：未能下载到任何历史数据")
+                        st.error("训练失败：未下载到任何历史数据")
                     else:
                         blob = serialize_model(*result)
                         save_model_to_db(blob, metrics)
@@ -1190,7 +1254,7 @@ with tab2:
                             "xgb_logloss": metrics["xgb_logloss"],
                         }
                         st.session_state["model_loaded"] = True
-                        st.success(f"✅ 训练完成！样本 {metrics['samples']:,} 场，LR LogLoss {metrics['lr_logloss']:.4f}，XGB LogLoss {metrics['xgb_logloss']:.4f}")
+                        st.success(f"✅ 训练完成！样本 {metrics['samples']:,} 场，LR {metrics['lr_logloss']:.4f}，XGB {metrics['xgb_logloss']:.4f}")
                         st.rerun()
                 except Exception as e:
                     st.error(f"训练出错：{e}")
@@ -1212,19 +1276,46 @@ with tab2:
             st.rerun()
 
     st.markdown("---")
-    st.subheader("⚙️ 参数调优")
-    st.caption("调整参数后，切换回【分析】标签页查看效果。")
-    params_now = copy.deepcopy(st.session_state["params"])
+    st.subheader("⚙️ 参数调优（联赛差异化）")
+    st.caption("选择【全局默认】或某个联赛，然后拖动滑块。分析时，每场比赛会用它对应联赛的参数。")
+
+    # 联赛选择器
+    scope_options = ["🌐 全局默认"] + SUPPORTED_LEAGUES
+    scope = st.selectbox("调参范围", scope_options, index=0)
+
+    if scope == "🌐 全局默认":
+        scope_params = st.session_state["params"]["default"]
+        scope_key = None
+    else:
+        if scope not in st.session_state["params"]["by_league"]:
+            st.session_state["params"]["by_league"][scope] = copy.deepcopy(st.session_state["params"]["default"])
+        scope_params = st.session_state["params"]["by_league"][scope]
+        scope_key = scope
+
+    # 显示当前差异（如果是具体联赛）
+    if scope_key:
+        default_w = st.session_state["params"]["default"]["weights"]
+        cur_w = scope_params["weights"]
+        diffs = []
+        for k in cur_w:
+            if abs(cur_w[k] - default_w[k]) > 0.001:
+                diffs.append(f"{k}: {default_w[k]:.2f} → {cur_w[k]:.2f}")
+        if diffs:
+            st.info(f"与全局默认的差异： {' | '.join(diffs)}")
+        else:
+            st.caption("当前与全局默认一致")
+
+    params_now = copy.deepcopy(scope_params)
 
     st.markdown("**① 五项系数权重**")
     c1, c2 = st.columns(2)
     with c1:
-        params_now["weights"]["injury"] = st.slider("伤停", 0.0, 0.5, params_now["weights"]["injury"], 0.01)
-        params_now["weights"]["home_away"] = st.slider("主客场", 0.0, 0.5, params_now["weights"]["home_away"], 0.01)
-        params_now["weights"]["h2h"] = st.slider("H2H", 0.0, 0.5, params_now["weights"]["h2h"], 0.01)
+        params_now["weights"]["injury"] = st.slider(f"{scope} · 伤停", 0.0, 0.5, params_now["weights"]["injury"], 0.01, key=f"inj_{scope}")
+        params_now["weights"]["home_away"] = st.slider(f"{scope} · 主客场", 0.0, 0.5, params_now["weights"]["home_away"], 0.01, key=f"ha_{scope}")
+        params_now["weights"]["h2h"] = st.slider(f"{scope} · H2H", 0.0, 0.5, params_now["weights"]["h2h"], 0.01, key=f"h2h_{scope}")
     with c2:
-        params_now["weights"]["form"] = st.slider("近期状态", 0.0, 0.5, params_now["weights"]["form"], 0.01)
-        params_now["weights"]["motivation"] = st.slider("战意", 0.0, 0.5, params_now["weights"]["motivation"], 0.01)
+        params_now["weights"]["form"] = st.slider(f"{scope} · 近期状态", 0.0, 0.5, params_now["weights"]["form"], 0.01, key=f"form_{scope}")
+        params_now["weights"]["motivation"] = st.slider(f"{scope} · 战意", 0.0, 0.5, params_now["weights"]["motivation"], 0.01, key=f"mot_{scope}")
         tw = sum(params_now["weights"].values())
         if abs(tw - 1.0) > 0.01:
             st.warning(f"⚠️ 合计 {tw:.2f}")
@@ -1232,37 +1323,51 @@ with tab2:
             st.success(f"✅ 合计 {tw:.2f}")
 
     st.markdown("**② 模型融合比例**")
-    params_now["model_fusion"]["lr"] = st.slider("LR", 0.0, 1.0, params_now["model_fusion"]["lr"], 0.01)
+    params_now["model_fusion"]["lr"] = st.slider(f"{scope} · LR", 0.0, 1.0, params_now["model_fusion"]["lr"], 0.01, key=f"lr_{scope}")
     params_now["model_fusion"]["xgb"] = round(1 - params_now["model_fusion"]["lr"], 2)
     st.caption(f"XGB = {params_now['model_fusion']['xgb']}")
 
-    st.markdown("**③ 全局融合覆盖（可选）**")
-    use_ovr = st.checkbox("启用（忽略联赛默认）", value=params_now.get("market_fusion_override") is not None)
+    st.markdown("**③ 融合覆盖（可选）**")
+    use_ovr = st.checkbox(f"启用（忽略联赛默认比例）", value=params_now.get("market_fusion_override") is not None, key=f"ovr_{scope}")
     if use_ovr:
-        ov = st.slider("全局模型权重", 0.0, 1.0, params_now.get("market_fusion_override") or 0.55, 0.01)
+        ov = st.slider(f"{scope} · 模型权重", 0.0, 1.0, params_now.get("market_fusion_override") or 0.55, 0.01, key=f"ovv_{scope}")
         params_now["market_fusion_override"] = ov
     else:
         params_now["market_fusion_override"] = None
 
-    st.session_state["params"] = params_now
+    # 写回
+    if scope_key is None:
+        st.session_state["params"]["default"] = params_now
+    else:
+        st.session_state["params"]["by_league"][scope_key] = params_now
 
-    ca, cb = st.columns(2)
+    ca, cb, cc = st.columns(3)
     with ca:
-        if st.button("💾 保存为基准"):
+        if st.button("💾 保存为版本"):
             st.session_state["param_versions"].append({
                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "scope": scope,
                 "params": copy.deepcopy(params_now),
             })
-            st.success("已保存")
+            st.success(f"已保存（{scope}）")
     with cb:
-        if st.button("↩️ 恢复默认"):
+        if st.button("↩️ 恢复本范围默认"):
+            if scope_key is None:
+                st.session_state["params"]["default"] = _base_params()
+            else:
+                st.session_state["params"]["by_league"][scope_key] = copy.deepcopy(st.session_state["params"]["default"])
+            st.success("已恢复")
+            st.rerun()
+    with cc:
+        if st.button("🔄 全部恢复出厂"):
             st.session_state["params"] = get_default_params()
+            st.success("已重置")
             st.rerun()
 
     if st.session_state.get("param_versions"):
-        with st.expander("📋 历史版本"):
+        with st.expander("📋 保存的版本"):
             for i, v in enumerate(reversed(st.session_state["param_versions"])):
-                st.markdown(f"**版本 {len(st.session_state['param_versions'])-i}** · {v['time']}")
+                st.markdown(f"**版本 {len(st.session_state['param_versions'])-i}** · {v.get('scope', '?')} · {v['time']}")
                 st.caption(f"伤停{v['params']['weights']['injury']} 主客{v['params']['weights']['home_away']} H2H{v['params']['weights']['h2h']} 状态{v['params']['weights']['form']} 战意{v['params']['weights']['motivation']}")
 
 with tab3:
