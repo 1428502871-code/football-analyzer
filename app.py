@@ -476,25 +476,28 @@ if "results" in st.session_state:
                 st.markdown(f"**赔率（Pinnacle）**：主 {r['odds'][0]} / 平 {r['odds'][1]} / 客 {r['odds'][2]}")
                 st.caption(f"数据抓取时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # ============ 二串一推荐 ============
+   # ============ 二串一推荐 ============
     st.markdown("---")
     st.subheader("🎯 今日最稳二串一推荐")
     
     candidates = []
     for r in st.session_state["results"]:
-        p = r["probs"]["final"]
+        p = r["probs"]["final"] # 这里是 numpy 数组
         max_p = max(p)
-        max_idx = p.index(max_p)
+        max_idx = int(np.argmax(p)) # 修复：改用 np.argmax
         odd = r["odds"][max_idx]
+        
+        # 筛选条件：最终概率最高项 > 60%，且赔率在合理区间
         if max_p > 60 and 1.30 <= odd <= 2.50:
             market_p = r["probs"]["market"]
-            if max_p - market_p[max_idx] >= 0:
+            if max_p - market_p[max_idx] >= 0: # 模型看好的方向不比市场差
                 candidates.append({
                     "match": r["match"], "league": r["league_cn"],
                     "pick": ["主胜", "平局", "客胜"][max_idx],
                     "prob": max_p, "odd": odd
                 })
     
+    # 寻找最佳二串一组合（赔率 1.7 - 4.0）
     best_combo = None
     best_score = 0
     for i in range(len(candidates)):
