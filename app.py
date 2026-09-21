@@ -19,7 +19,6 @@ HEADERS = {"x-apisports-key": api_key}
 BASE_URL = "https://v3.football.api-sports.io"
 
 
-# ============ 数据库连接 ============
 def get_db_engine():
     if not db_url or not db_url.startswith("postgresql"):
         return None
@@ -31,7 +30,6 @@ def get_db_engine():
 
 
 def save_to_db(record):
-    """保存分析记录到 Supabase"""
     engine = get_db_engine()
     if not engine:
         return False
@@ -46,12 +44,11 @@ def save_to_db(record):
             """), record)
             conn.commit()
         return True
-    except Exception as e:
+    except Exception:
         return False
 
 
 def load_history(limit=200):
-    """读取历史分析记录"""
     engine = get_db_engine()
     if not engine:
         return []
@@ -67,7 +64,6 @@ def load_history(limit=200):
 
 
 def update_result(record_id, actual_result):
-    """回填赛果"""
     engine = get_db_engine()
     if not engine:
         return False
@@ -81,6 +77,50 @@ def update_result(record_id, actual_result):
         return True
     except Exception:
         return False
+
+
+def auto_update_results():
+    """自动查询已分析但未回填的比赛，更新赛果。只查最近30天。"""
+    engine = get_db_engine()
+    if not engine:
+        return 0
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            result = conn.execute(text("""
+                SELECT id, match_id FROM analysis_history
+                WHERE (actual_result IS NULL OR actual_result = '')
+                AND match_id IS NOT NULL
+                AND created_at > NOW() - INTERVAL '30 days'
+            """))
+            rows = [(r[0], r[1]) for r in result]
+    except Exception:
+        return 0
+
+    if not rows:
+        return 0
+
+    updated = 0
+    for rid, mid in rows:
+        try:
+            r = requests.get(f"{BASE_URL}/fixtures", headers=HEADERS,
+                             params={"id": mid}, timeout=10)
+            data = r.json()
+            if not data.get("response"):
+                continue
+            fx = data["response"][0]
+            status = fx["fixture"]["status"]["short"]
+            if status in ["FT", "AET", "PEN"]:
+                hg = fx["goals"]["home"]
+                ag = fx["goals"]["away"]
+                if hg is None or ag is None:
+                    continue
+                result = "主胜" if hg > ag else ("平局" if hg == ag else "客胜")
+                if update_result(rid, result):
+                    updated += 1
+        except Exception:
+            continue
+    return updated
 
 
 def current_season():
@@ -182,7 +222,6 @@ def parse_match(m):
     return " ".join(parts[:mid]), " ".join(parts[mid:])
 
 
-# ============ API 调用 ============
 @st.cache_data(ttl=3600)
 def search_fixtures_by_date(date_str):
     try:
@@ -341,7 +380,6 @@ def get_recent_form(team_id, last=6):
         return []
 
 
-# ============ 系数和概率计算 ============
 def calc_injury_coef(injuries, home_id, away_id):
     pos_w = {"Goalkeeper": 1.2, "Defender": 1.1, "Midfielder": 1.0, "Attacker": 1.1}
     h_score, a_score = 0, 0
@@ -543,6 +581,16 @@ def analyze_match(home_name, away_name, date_hint=None):
 
 
 # ================================================================
+# ============ 应用启动时自动回填赛果 ============
+# ================================================================
+if "auto_updated_once" not in st.session_state:
+    st.session_state["auto_updated_once"] = True
+    _n = auto_update_results()
+    if _n > 0:
+        st.toast(f"✅ 已自动回填 {_n} 场比赛赛果", icon="🎯")
+
+
+# ================================================================
 # ============ 界面 ============
 # ================================================================
 tab1, tab2, tab3 = st.tabs(["📊 分析", "⚙️ 调参", "📚 历史记录"])
@@ -649,7 +697,6 @@ with tab1:
             else:
                 st.session_state["results"] = results
                 st.session_state["cache_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                # 自动存库
                 saved = 0
                 for r in results:
                     p = calc_all_probs(r["odds"], r["coefs"], r["league_id"], st.session_state["params"], r["league_api"])
@@ -665,7 +712,6 @@ with tab1:
                         saved += 1
                 st.success(f"分析完成！共 {len(results)} 场，已存库 {saved} 场")
 
-    # 结果展示
     if "results" in st.session_state:
         if st.session_state.get("cache_time"):
             st.caption(f"⏱️ 数据缓存于 {st.session_state['cache_time']}")
@@ -712,7 +758,6 @@ with tab1:
                         st.dataframe(pd.DataFrame(r["h2h"]), hide_index=True)
                     st.markdown(f"**赔率**：主 {r['odds'][0]} / 平 {r['odds'][1]} / 客 {r['odds'][2]}")
 
-        # 二串一
         st.markdown("---")
         st.subheader("🎯 今日最稳二串一推荐")
         candidates = []
@@ -751,7 +796,7 @@ with tab1:
 
 with tab2:
     st.subheader("⚙️ 参数调优")
-    st.caption("调整参数后，请切换回【分析】标签页查看效果。")
+    st.caption("调整参数后，切换回【分析】标签页查看效果。")
     params_now = copy.deepcopy(st.session_state["params"])
 
     st.markdown("**① 五项系数权重**")
@@ -805,41 +850,63 @@ with tab2:
 
 with tab3:
     st.subheader("📚 历史分析记录")
-    st.caption("每次分析自动存库，重启不丢失。")
+    st.caption("每次分析自动存库。赛果自动回填，不需要手动操作。")
 
     col_a, col_b = st.columns([1, 4])
     with col_a:
-        if st.button("🔄 刷新"):
-            st.rerun()
+        if st.button("🔄 手动检查赛果"):
+            with st.spinner("正在查询..."):
+                n = auto_update_results()
+                st.success(f"已更新 {n} 场")
+                st.rerun()
+    with col_b:
+        st.write("")
 
     history = load_history(200)
     if not history:
         st.info("暂无历史记录，或数据库未配置")
     else:
         st.success(f"共 {len(history)} 条记录")
+        # 统计
+        finished = [h for h in history if h.get("actual_result")]
+        if finished:
+            hits = 0
+            for h in finished:
+                try:
+                    pj = json.loads(h.get("probs_json") or "{}")
+                    fin = pj.get("final", [])
+                    if isinstance(fin, list) and len(fin) == 3:
+                        pred = ["主胜", "平局", "客胜"][int(np.argmax(fin))]
+                        if pred == h["actual_result"]:
+                            hits += 1
+                except Exception:
+                    pass
+            rate = hits / len(finished) * 100
+            st.metric("模型命中率", f"{rate:.1f}%", f"已回填 {len(finished)} 场")
+
         for h in history:
             with st.container(border=True):
                 st.markdown(f"**{h.get('match_name','')}** · {h.get('league','')}")
                 st.caption(f"分析时间：{h.get('analysis_time','')} | 健康度：{h.get('health_score',0)}%")
                 try:
                     pj = json.loads(h.get("probs_json") or "{}")
-                    if pj.get("final"):
-                        fin = pj["final"]
-                        if isinstance(fin, list):
-                            st.markdown(f"最终概率：主 **{fin[0]}%** / 平 **{fin[1]}%** / 客 **{fin[2]}%**")
+                    fin = pj.get("final")
+                    if isinstance(fin, list) and len(fin) == 3:
+                        st.markdown(f"最终概率：主 **{fin[0]}%** / 平 **{fin[1]}%** / 客 **{fin[2]}%**")
                 except Exception:
                     pass
                 st.markdown(f"赔率：主 {h.get('home_odds')} / 平 {h.get('draw_odds')} / 客 {h.get('away_odds')}")
                 if h.get("actual_result"):
-                    st.success(f"赛果：{h['actual_result']}")
+                    st.success(f"✅ 赛果：{h['actual_result']}")
                 else:
-                    col_x, col_y = st.columns([3, 1])
-                    with col_x:
-                        res = st.selectbox("回填赛果", ["", "主胜", "平局", "客胜"],
-                                           key=f"res_{h['id']}")
-                    with col_y:
-                        if st.button("保存", key=f"sv_{h['id']}"):
-                            if res:
-                                update_result(h["id"], res)
-                                st.success("已保存")
-                                st.rerun()
+                    st.info("⏳ 赛果待更新（比赛未结束或数据未同步）")
+                    with st.expander("手动回填（可选）"):
+                        col_x, col_y = st.columns([3, 1])
+                        with col_x:
+                            res = st.selectbox("选择赛果", ["", "主胜", "平局", "客胜"], key=f"res_{h['id']}")
+                        with col_y:
+                            if st.button("保存", key=f"sv_{h['id']}"):
+                                if res:
+                                    update_result(h["id"], res)
+                                    st.success("已保存")
+                                    st.rerun()
