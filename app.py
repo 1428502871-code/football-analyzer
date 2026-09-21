@@ -407,7 +407,7 @@ def get_params_for_league(params, league_cn):
     return params["default"]
 
 
-# ============ Session State（不调用 pickle，避免竞态） ============
+# ============ Session State 初始化（纯字典操作，无 pickle / 无网络） ============
 if "params" not in st.session_state:
     st.session_state["params"] = get_default_params()
 elif not isinstance(st.session_state.get("params"), dict) or "by_league" not in st.session_state["params"]:
@@ -421,8 +421,6 @@ if "model_loaded" not in st.session_state:
     st.session_state["model_loaded"] = False
     st.session_state["model_tuple"] = None
     st.session_state["model_meta"] = None
-if "model_checked" not in st.session_state:
-    st.session_state["model_checked"] = False
 
 
 POSITION_CN = {"Goalkeeper": "门将", "Defender": "后卫", "Midfielder": "中场",
@@ -1214,22 +1212,6 @@ with tab1:
             st.warning("⚠️ 今日无符合条件的二串一推荐")
 
 with tab2:
-    # 首次进入此 tab 时从数据库加载模型（延迟加载，避免启动时竞态）
-    if not st.session_state.get("model_checked", False):
-        st.session_state["model_checked"] = True
-        try:
-            loaded = load_model_from_db()
-            if loaded:
-                st.session_state["model_tuple"] = loaded["model"]
-                st.session_state["model_meta"] = {
-                    "trained_at": loaded["trained_at"],
-                    "samples": loaded["samples"],
-                    "lr_logloss": loaded["lr_logloss"],
-                    "xgb_logloss": loaded["xgb_logloss"]}
-                st.session_state["model_loaded"] = True
-        except Exception:
-            pass
-
     st.subheader("🤖 模型训练")
     if st.session_state.get("model_loaded") and st.session_state.get("model_meta"):
         meta = st.session_state["model_meta"]
@@ -1240,9 +1222,29 @@ with tab2:
         c3.metric("XGB LogLoss", f"{meta.get('xgb_logloss', 0):.4f}")
     else:
         st.warning("⚠️ 尚未加载模型。当前分析使用'公式模式'。")
-        st.caption("点击【🚀 一键学习】训练真模型。")
-    col_a, col_b = st.columns(2)
+        st.caption("点击【📥 从数据库加载模型】或【🚀 一键学习】。")
+
+    col_a, col_b, col_c = st.columns(3)
     with col_a:
+        if st.button("📥 从数据库加载模型", key="load_model_btn"):
+            with st.spinner("正在加载模型..."):
+                try:
+                    loaded = load_model_from_db()
+                    if loaded:
+                        st.session_state["model_tuple"] = loaded["model"]
+                        st.session_state["model_meta"] = {
+                            "trained_at": loaded["trained_at"],
+                            "samples": loaded["samples"],
+                            "lr_logloss": loaded["lr_logloss"],
+                            "xgb_logloss": loaded["xgb_logloss"]}
+                        st.session_state["model_loaded"] = True
+                        st.success("✅ 模型已加载")
+                        st.rerun()
+                    else:
+                        st.warning("数据库中还没有已训练的模型")
+                except Exception as e:
+                    st.error(f"加载失败：{e}")
+    with col_b:
         if st.button("🚀 一键学习", type="primary"):
             with st.spinner("正在下载历史数据并训练模型..."):
                 try:
@@ -1262,7 +1264,7 @@ with tab2:
                         st.rerun()
                 except Exception as e:
                     st.error(f"训练出错：{e}")
-    with col_b:
+    with col_c:
         if st.button("🗑️ 清除当前模型"):
             st.session_state["model_loaded"] = False
             st.session_state["model_tuple"] = None
@@ -1355,14 +1357,6 @@ with tab2:
 
 with tab3:
     st.subheader("📚 历史分析记录")
-    if "auto_checked_tab3" not in st.session_state:
-        st.session_state["auto_checked_tab3"] = True
-        try:
-            with st.spinner("正在检查赛果..."):
-                _n = auto_update_results()
-            if _n > 0: st.success(f"✅ 已自动回填 {_n} 场比赛赛果")
-        except Exception:
-            pass
     ca, cb = st.columns([1, 4])
     with ca:
         if st.button("🔄 手动检查赛果"):
@@ -1370,93 +1364,108 @@ with tab3:
                 n = auto_update_results()
                 st.success(f"已更新 {n} 场")
                 st.rerun()
-    history = load_history(200)
-    if not history:
-        st.info("暂无历史记录")
+    with cb:
+        if st.button("📚 加载历史记录"):
+            st.session_state["history_loaded"] = True
+            st.rerun()
+
+    if st.session_state.get("history_loaded"):
+        history = load_history(200)
+        if not history:
+            st.info("暂无历史记录")
+        else:
+            st.success(f"共 {len(history)} 条")
+            fin = [h for h in history if h.get("actual_result")]
+            if fin:
+                hits = 0
+                for h in fin:
+                    try:
+                        pj = json.loads(h.get("probs_json") or "{}")
+                        f = pj.get("final", [])
+                        if isinstance(f, list) and len(f) == 3:
+                            pred = ["主胜", "平局", "客胜"][int(np.argmax(f))]
+                            if pred == h["actual_result"]: hits += 1
+                    except Exception:
+                        pass
+                rate = hits / len(fin) * 100
+                st.metric("模型命中率", f"{rate:.1f}%", f"已回填 {len(fin)} 场")
+            for h in history:
+                with st.container(border=True):
+                    st.markdown(f"**{h.get('match_name','')}** · {h.get('league','')}")
+                    st.caption(f"分析时间：{h.get('analysis_time','')} | 健康度：{h.get('health_score',0)}%")
+                    try:
+                        pj = json.loads(h.get("probs_json") or "{}")
+                        f = pj.get("final")
+                        if isinstance(f, list) and len(f) == 3:
+                            st.markdown(f"最终概率：主 **{f[0]}%** / 平 **{f[1]}%** / 客 **{f[2]}%**")
+                    except Exception:
+                        pass
+                    st.markdown(f"赔率：主 {h.get('home_odds')} / 平 {h.get('draw_odds')} / 客 {h.get('away_odds')}")
+                    if h.get("actual_result"):
+                        st.success(f"✅ 赛果：{h['actual_result']}")
+                    else:
+                        st.info("⏳ 赛果待更新")
+                        with st.expander("手动回填（可选）"):
+                            cx, cy = st.columns([3, 1])
+                            with cx:
+                                res = st.selectbox("选择赛果", ["", "主胜", "平局", "客胜"], key=f"res_{h['id']}")
+                            with cy:
+                                if st.button("保存", key=f"sv_{h['id']}"):
+                                    if res:
+                                        update_result(h["id"], res)
+                                        st.success("已保存")
+                                        st.rerun()
     else:
-        st.success(f"共 {len(history)} 条")
-        fin = [h for h in history if h.get("actual_result")]
-        if fin:
-            hits = 0
-            for h in fin:
-                try:
-                    pj = json.loads(h.get("probs_json") or "{}")
-                    f = pj.get("final", [])
-                    if isinstance(f, list) and len(f) == 3:
-                        pred = ["主胜", "平局", "客胜"][int(np.argmax(f))]
-                        if pred == h["actual_result"]: hits += 1
-                except Exception:
-                    pass
-            rate = hits / len(fin) * 100
-            st.metric("模型命中率", f"{rate:.1f}%", f"已回填 {len(fin)} 场")
-        for h in history:
-            with st.container(border=True):
-                st.markdown(f"**{h.get('match_name','')}** · {h.get('league','')}")
-                st.caption(f"分析时间：{h.get('analysis_time','')} | 健康度：{h.get('health_score',0)}%")
-                try:
-                    pj = json.loads(h.get("probs_json") or "{}")
-                    f = pj.get("final")
-                    if isinstance(f, list) and len(f) == 3:
-                        st.markdown(f"最终概率：主 **{f[0]}%** / 平 **{f[1]}%** / 客 **{f[2]}%**")
-                except Exception:
-                    pass
-                st.markdown(f"赔率：主 {h.get('home_odds')} / 平 {h.get('draw_odds')} / 客 {h.get('away_odds')}")
-                if h.get("actual_result"):
-                    st.success(f"✅ 赛果：{h['actual_result']}")
-                else:
-                    st.info("⏳ 赛果待更新")
-                    with st.expander("手动回填（可选）"):
-                        cx, cy = st.columns([3, 1])
-                        with cx:
-                            res = st.selectbox("选择赛果", ["", "主胜", "平局", "客胜"], key=f"res_{h['id']}")
-                        with cy:
-                            if st.button("保存", key=f"sv_{h['id']}"):
-                                if res:
-                                    update_result(h["id"], res)
-                                    st.success("已保存")
-                                    st.rerun()
+        st.info("点击上方【📚 加载历史记录】按钮加载数据")
 
 with tab4:
     st.subheader("📈 概率校准分析")
     st.caption("校准 = 对比模型给出的概率与实际发生频率。")
-    cal = calc_calibration()
-    if cal is None:
-        st.info("样本不足 10 场，暂无法进行校准分析。")
+    if st.button("📈 加载校准数据"):
+        st.session_state["cal_loaded"] = True
+        st.rerun()
+
+    if st.session_state.get("cal_loaded"):
+        cal = calc_calibration()
+        if cal is None:
+            st.info("样本不足 10 场，暂无法进行校准分析。")
+        else:
+            st.markdown("**主胜概率区间 vs 实际主胜率**")
+            df_cal = pd.DataFrame(cal)
+            st.dataframe(df_cal, hide_index=True)
+            st.markdown("**判定**")
+            for row in cal:
+                dev = row["偏差"]
+                if abs(dev) < 5:
+                    st.markdown(f"✅ **{row['概率区间']}**：预测 {row['预测均值']}% → 实际 {row['实际主胜率']}%（准确）")
+                elif dev > 5:
+                    st.markdown(f"⚠️ **{row['概率区间']}**：预测 {row['预测均值']}% → 实际 {row['实际主胜率']}%（低估）")
+                else:
+                    st.markdown(f"⚠️ **{row['概率区间']}**：预测 {row['预测均值']}% → 实际 {row['实际主胜率']}%（高估）")
+        st.markdown("---")
+        st.subheader("📊 历史 LogLoss")
+        ol = calc_overall_logloss()
+        if ol:
+            loss, n = ol
+            c1, c2 = st.columns(2)
+            c1.metric("平均 LogLoss", f"{loss}")
+            c2.metric("已回填比赛", f"{n} 场")
+            st.caption("LogLoss 越低越好。0.90 以下优秀，1.00 左右正常，1.10 以上偏弱。")
+        else:
+            st.info("暂无足够的已回填比赛")
+        st.markdown("---")
+        st.subheader("📜 训练日志")
+        logs = load_training_logs(30)
+        if not logs:
+            st.info("暂无训练记录")
+        else:
+            for log in logs:
+                with st.container(border=True):
+                    st.markdown(f"**{log['trained_at']}**")
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("样本", f"{log['samples']:,}")
+                    c2.metric("LR LogLoss", f"{log['lr_logloss']:.4f}")
+                    c3.metric("XGB LogLoss", f"{log['xgb_logloss']:.4f}")
+                    if log.get("notes"): st.caption(log["notes"])
     else:
-        st.markdown("**主胜概率区间 vs 实际主胜率**")
-        df_cal = pd.DataFrame(cal)
-        st.dataframe(df_cal, hide_index=True)
-        st.markdown("**判定**")
-        for row in cal:
-            dev = row["偏差"]
-            if abs(dev) < 5:
-                st.markdown(f"✅ **{row['概率区间']}**：预测 {row['预测均值']}% → 实际 {row['实际主胜率']}%（准确）")
-            elif dev > 5:
-                st.markdown(f"⚠️ **{row['概率区间']}**：预测 {row['预测均值']}% → 实际 {row['实际主胜率']}%（低估）")
-            else:
-                st.markdown(f"⚠️ **{row['概率区间']}**：预测 {row['预测均值']}% → 实际 {row['实际主胜率']}%（高估）")
-    st.markdown("---")
-    st.subheader("📊 历史 LogLoss")
-    ol = calc_overall_logloss()
-    if ol:
-        loss, n = ol
-        c1, c2 = st.columns(2)
-        c1.metric("平均 LogLoss", f"{loss}")
-        c2.metric("已回填比赛", f"{n} 场")
-        st.caption("LogLoss 越低越好。0.90 以下优秀，1.00 左右正常，1.10 以上偏弱。")
-    else:
-        st.info("暂无足够的已回填比赛")
-    st.markdown("---")
-    st.subheader("📜 训练日志")
-    logs = load_training_logs(30)
-    if not logs:
-        st.info("暂无训练记录")
-    else:
-        for log in logs:
-            with st.container(border=True):
-                st.markdown(f"**{log['trained_at']}**")
-                c1, c2, c3 = st.columns(3)
-                c1.metric("样本", f"{log['samples']:,}")
-                c2.metric("LR LogLoss", f"{log['lr_logloss']:.4f}")
-                c3.metric("XGB LogLoss", f"{log['xgb_logloss']:.4f}")
-                if log.get("notes"): st.caption(log["notes"])
+        st.info("点击上方【📈 加载校准数据】按钮加载数据")
