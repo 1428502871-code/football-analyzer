@@ -590,21 +590,47 @@ def serialize_model(lr, scaler, xgb):
 def deserialize_model(s):
     return pickle.loads(base64.b64decode(s))
 
+def load_training_from_supabase():
+    """从 Supabase training_matches 表读取历史训练数据"""
+    engine = get_db_engine()
+    if not engine:
+        return None
+    try:
+        df = pd.read_sql("SELECT * FROM training_matches", engine)
+        if len(df) < 100:
+            return None
+        # 字段映射回原来的逻辑
+        df = df.rename(columns={
+            "home_goals": "FTHG", "away_goals": "FTAG",
+            "b365_home": "B365H", "b365_draw": "B365D", "b365_away": "B365A",
+        })
+        # 用 Avg 或 Pinnacle 补缺失
+        if "avg_home" in df.columns:
+            df["B365H"] = df["B365H"].fillna(df["avg_home"])
+            df["B365D"] = df["B365D"].fillna(df["avg_draw"])
+            df["B365A"] = df["B365A"].fillna(df["avg_away"])
+        # 只保留有赔率的行
+        df = df.dropna(subset=["B365H", "B365D", "B365A", "FTHG", "FTAG"])
+        return df
+    except Exception as e:
+        print(f"读取 Supabase 训练数据失败：{e}")
+        return None
 
 def run_full_training():
-    all_dfs = []
     progress_ph = st.empty()
-    total = len(LEAGUE_CODE_MAP)
-    for i, league in enumerate(LEAGUE_CODE_MAP.keys()):
-        progress_ph.info(f"[{i+1}/{total}] 下载 {league}...")
-        df = download_league_csv(league)
-        if df is None: continue
-        clean, feat_cols = preprocess_df(df)
-        if clean is not None: all_dfs.append(clean)
+    progress_ph.info("正在从 Supabase 读取训练数据...")
+    df = load_training_from_supabase()
+    if df is None or len(df) < 100:
+        progress_ph.empty()
+        return None, None
+    progress_ph.info(f"读取 {len(df)} 场，正在处理特征...")
+    clean, feat_cols = preprocess_df(df)
     progress_ph.empty()
-    if not all_dfs: return None, None
-    combined = pd.concat(all_dfs, ignore_index=True)
-    lr, scaler, xgb, metrics = train_models(combined, feat_cols)
+    if clean is None:
+        return None, None
+    progress_ph.info(f"正在训练 LR + XGBoost（{len(clean)} 场）...")
+    lr, scaler, xgb, metrics = train_models(clean, feat_cols)
+    progress_ph.empty()
     return (lr, scaler, xgb), metrics
 
 
