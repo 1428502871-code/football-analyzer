@@ -383,8 +383,8 @@ def get_default_params():
     by_league["意甲"]["weights"] = {"injury": 0.21, "home_away": 0.19, "h2h": 0.16, "form": 0.21, "motivation": 0.23}
     by_league["西甲"]["weights"] = {"injury": 0.19, "home_away": 0.20, "h2h": 0.20, "form": 0.21, "motivation": 0.20}
     by_league["法甲"]["weights"] = {"injury": 0.21, "home_away": 0.18, "h2h": 0.17, "form": 0.22, "motivation": 0.22}
-    by_league["挪超"]["weights"] = {"injury": 0.18, "home_away": 0.28, "h2h": 0.15, "form": 0.22, "motivation": 0.17}
-    by_league["瑞超"]["weights"] = {"injury": 0.18, "home_away": 0.28, "h2h": 0.15, "form": 0.22, "motivation": 0.17}
+    by_league["挪超"]["weights"] = {"injury": 0.18, "home_away": 0.28, "h2h": 0.15, "form": 0.22, "weightsmotivation": 0.17}
+    by"_league["瑞超"]["weights"] = {" ininjury": 0.18, params "home_away else": 0.28, "h2h": 0.15, "form": 0.22, "motivation": 0.17}
     by_league["丹超"]["weights"] = {"injury": 0.19, "home_away": 0.26, "h2h": 0.15, "form": 0.22, "motivation": 0.18}
     by_league["芬超"]["weights"] = {"injury": 0.18, "home_away": 0.28, "h2h": 0.13, "form": 0.23, "motivation": 0.18}
     by_league["欧冠"]["weights"] = {"injury": 0.24, "home_away": 0.18, "h2h": 0.18, "form": 0.22, "motivation": 0.18}
@@ -401,7 +401,7 @@ def get_default_params():
 
 def get_params_for_league(params, league_cn):
     if not isinstance(params, dict) or "by_league" not in params:
-        return params if "weights" in params else _base_params()
+        return params if " _base_params()
     if league_cn in params["by_league"]: return params["by_league"][league_cn]
     return params["default"]
 
@@ -777,7 +777,6 @@ def check_data_health(injuries, h2h, h_recent, a_recent, odds):
 
 
 def analyze_match(home_name, away_name, date_hint=None, fixture_id=None):
-    # ★ 优先按 fixture_id 直查（100% 准确）
     if fixture_id:
         fixture = get_fixture_by_id(fixture_id)
         if not fixture:
@@ -827,7 +826,7 @@ def analyze_match(home_name, away_name, date_hint=None, fixture_id=None):
 
     odds = get_odds(fid)
     if not odds[0]:
-        return None, f"未找到赔率：{hs} vs {as_}（可能未开盘或数据源未提供）"
+        return None, f"未找到赔率（已下架或未开盘）"
 
     injuries = get_injuries(fid)
     h2h = get_h2h(hid, aid)
@@ -964,7 +963,6 @@ with tab1:
                 opt = f"[{lc}] {hc} vs {ac} ({ts})"
                 options.append(opt)
                 _d = st.session_state.get("date_fixtures_date", datetime.now().strftime("%Y-%m-%d"))
-                # ★ 存 fixture_id + 英文队名 + 日期
                 o2m[opt] = f"{fid}###{home_en}||{away_en}@{_d}"
             sel = st.multiselect("勾选要分析的比赛", options)
             c1, c2 = st.columns(2)
@@ -986,10 +984,6 @@ with tab1:
                     st.rerun()
             if st.session_state.get("selected_matches"):
                 st.info(f"📋 当前待分析列表：{len(st.session_state['selected_matches'])} 场")
-                with st.expander("查看已加入列表（含格式诊断）"):
-                    for i, sm in enumerate(st.session_state["selected_matches"], 1):
-                        fmt = "✅ 含ID（精确匹配）" if "###" in sm else ("⚠️ 无ID（建议清空重加）" if "||" in sm else "❌ 旧格式（建议清空重加）")
-                        st.write(f"{i}. {sm}  —  {fmt}")
 
     st.markdown("---")
     st.subheader("📊 手动输入或确认分析列表")
@@ -1015,10 +1009,10 @@ with tab1:
             st.error("API Key 未配置")
         else:
             results = []
+            failures = []
             prog = st.progress(0)
             for i, m in enumerate(all_m):
                 prog.progress((i + 1) / len(all_m), text=f"分析中：{m}")
-                # ★ 解析 fixture_id
                 fid_used = None
                 if "###" in m:
                     try:
@@ -1030,24 +1024,23 @@ with tab1:
                 else: mp, dp = m, None
                 try:
                     if fid_used:
-                        # 有 fixture_id → 直接查
                         r, err = analyze_match(None, None, dp, fixture_id=fid_used)
                     else:
-                        # 无 id → 走搜索流程
                         h, a = parse_match(mp)
                         if not h or not a:
-                            st.warning(f"无法解析：{mp}")
+                            failures.append((mp, "无法解析"))
                             continue
                         r, err = analyze_match(h, a, dp)
-                    if err: st.warning(err)
+                    if err: failures.append((mp, err))
                     else: results.append(r)
                 except Exception as e:
-                    st.warning(f"分析 {m} 时出错：{e}")
+                    failures.append((mp, f"异常：{e}"))
                     continue
             prog.empty()
-            if not results:
-                st.error("分析失败")
-            else:
+
+            # ★★★ 关键改动：成功列表先展示，失败折叠框放最后且默认折叠
+            if results:
+                st.success(f"✅ 成功 {len(results)} 场 | ⚠️ 失败 {len(failures)} 场（详情在页面底部）")
                 st.session_state["results"] = results
                 st.session_state["cache_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 saved = 0
@@ -1067,14 +1060,24 @@ with tab1:
                         if ok: saved += 1
                     except Exception:
                         continue
-                st.success(f"分析完成！共 {len(results)} 场，已存库 {saved} 场")
+                st.success(f"已存库 {saved} 场")
+            else:
+                st.error(f"全部失败（{len(failures)} 场）。最常见原因：**赔率已下架**（3 天前的比赛赔率没有）。请搜今天/明天的比赛。")
+
+            # 失败折叠框：放最后，默认折叠
+            if failures:
+                with st.expander(f"⚠️ {len(failures)} 场失败（点击查看详情）", expanded=False):
+                    for fm, fe in failures[:200]:
+                        st.caption(f"· {fm} → {fe}")
+                    if len(failures) > 200:
+                        st.caption(f"... 还有 {len(failures) - 200} 场，省略")
 
     if "results" in st.session_state:
         if st.session_state.get("cache_time"):
             st.caption(f"⏱️ 数据缓存于 {st.session_state['cache_time']}")
         params = st.session_state["params"]
         st.markdown("---")
-        st.subheader("📋 分析结果总览")
+        st.subheader(f"📋 分析结果总览（{len(st.session_state['results'])} 场）")
         for r in st.session_state["results"]:
             with st.container(border=True):
                 try:
