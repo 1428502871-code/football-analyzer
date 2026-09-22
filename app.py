@@ -510,6 +510,19 @@ def search_fixtures_by_date(date_str):
 
 
 @st.cache_data(ttl=3600)
+def get_fixture_by_id(fixture_id):
+    try:
+        r = requests.get(f"{BASE_URL}/fixtures", headers=HEADERS,
+            params={"id": fixture_id}, timeout=10)
+        data = r.json()
+        if data.get("response"):
+            return data["response"][0]
+    except Exception:
+        pass
+    return None
+
+
+@st.cache_data(ttl=3600)
 def search_team(name):
     en_name = cn_to_en(name)
     candidates = [en_name]
@@ -548,19 +561,6 @@ def search_team(name):
         except Exception:
             continue
     return None, None
-
-
-@st.cache_data(ttl=3600)
-def get_fixture(home_id, away_id, date_str):
-    try:
-        r = requests.get(f"{BASE_URL}/fixtures", headers=HEADERS,
-            params={"date": date_str, "timezone": "Asia/Shanghai"}, timeout=10)
-        for f in r.json().get("response", []):
-            if f["teams"]["home"]["id"] == home_id and f["teams"]["away"]["id"] == away_id:
-                return f
-    except Exception:
-        pass
-    return None
 
 
 @st.cache_data(ttl=3600)
@@ -776,32 +776,48 @@ def check_data_health(injuries, h2h, h_recent, a_recent, odds):
     return checks, round(score)
 
 
-def analyze_match(home_name, away_name, date_hint=None):
-    hid, hs = search_team(home_name)
-    aid, as_ = search_team(away_name)
-    if not hid or not aid:
-        return None, f"球队搜索失败：{home_name} / {away_name}"
-
-    fixture = None
-    if date_hint:
-        fixture = get_fixture(hid, aid, date_hint)
+def analyze_match(home_name, away_name, date_hint=None, fixture_id=None):
+    # ★ 优先按 fixture_id 直查（100% 准确）
+    if fixture_id:
+        fixture = get_fixture_by_id(fixture_id)
         if not fixture:
+            return None, f"未找到比赛 ID {fixture_id}"
+        hid = fixture["teams"]["home"]["id"]
+        hs = fixture["teams"]["home"]["name"]
+        aid = fixture["teams"]["away"]["id"]
+        as_ = fixture["teams"]["away"]["name"]
+    else:
+        hid, hs = search_team(home_name)
+        aid, as_ = search_team(away_name)
+        if not hid or not aid:
+            return None, f"球队搜索失败：{home_name} / {away_name}"
+        fixture = None
+        if date_hint:
             try:
                 bd = datetime.strptime(date_hint, "%Y-%m-%d")
-                for off in [-1, 1, -2, 2, -3, 3, -4, 4]:
+                for off in [0, -1, 1, -2, 2, -3, 3, -4, 4]:
                     d = (bd + timedelta(days=off)).strftime("%Y-%m-%d")
-                    fixture = get_fixture(hid, aid, d)
+                    r = requests.get(f"{BASE_URL}/fixtures", headers=HEADERS,
+                        params={"date": d, "timezone": "Asia/Shanghai"}, timeout=10)
+                    for f in r.json().get("response", []):
+                        if f["teams"]["home"]["id"] == hid and f["teams"]["away"]["id"] == aid:
+                            fixture = f
+                            break
                     if fixture: break
             except Exception:
                 pass
-    else:
-        for off in range(0, 10):
-            d = (datetime.now() + timedelta(days=off)).strftime("%Y-%m-%d")
-            fixture = get_fixture(hid, aid, d)
-            if fixture: break
-
-    if not fixture:
-        return None, f"未找到比赛：{hs} vs {as_}"
+        else:
+            for off in range(0, 10):
+                d = (datetime.now() + timedelta(days=off)).strftime("%Y-%m-%d")
+                r = requests.get(f"{BASE_URL}/fixtures", headers=HEADERS,
+                    params={"date": d, "timezone": "Asia/Shanghai"}, timeout=10)
+                for f in r.json().get("response", []):
+                    if f["teams"]["home"]["id"] == hid and f["teams"]["away"]["id"] == aid:
+                        fixture = f
+                        break
+                if fixture: break
+        if not fixture:
+            return None, f"未找到比赛：{hs} vs {as_}"
 
     fid = fixture["fixture"]["id"]
     lid = fixture["league"]["id"]
@@ -938,6 +954,7 @@ with tab1:
             st.success(f"共找到 {len(fixtures)} 场支持的联赛比赛")
             options, o2m = [], {}
             for f in fixtures:
+                fid = f["fixture"]["id"]
                 home_en = f["teams"]["home"]["name"]
                 away_en = f["teams"]["away"]["name"]
                 hc = en_to_cn(home_en)
@@ -947,7 +964,8 @@ with tab1:
                 opt = f"[{lc}] {hc} vs {ac} ({ts})"
                 options.append(opt)
                 _d = st.session_state.get("date_fixtures_date", datetime.now().strftime("%Y-%m-%d"))
-                o2m[opt] = f"{home_en}||{away_en}@{_d}"
+                # ★ 存 fixture_id + 英文队名 + 日期
+                o2m[opt] = f"{fid}###{home_en}||{away_en}@{_d}"
             sel = st.multiselect("勾选要分析的比赛", options)
             c1, c2 = st.columns(2)
             with c1:
@@ -970,7 +988,7 @@ with tab1:
                 st.info(f"📋 当前待分析列表：{len(st.session_state['selected_matches'])} 场")
                 with st.expander("查看已加入列表（含格式诊断）"):
                     for i, sm in enumerate(st.session_state["selected_matches"], 1):
-                        fmt = "✅ 新格式" if "||" in sm else "⚠️ 旧格式（建议清空重新加）"
+                        fmt = "✅ 含ID（精确匹配）" if "###" in sm else ("⚠️ 无ID（建议清空重加）" if "||" in sm else "❌ 旧格式（建议清空重加）")
                         st.write(f"{i}. {sm}  —  {fmt}")
 
     st.markdown("---")
@@ -1000,14 +1018,27 @@ with tab1:
             prog = st.progress(0)
             for i, m in enumerate(all_m):
                 prog.progress((i + 1) / len(all_m), text=f"分析中：{m}")
+                # ★ 解析 fixture_id
+                fid_used = None
+                if "###" in m:
+                    try:
+                        fid_part, m = m.split("###", 1)
+                        fid_used = int(fid_part)
+                    except Exception:
+                        fid_used = None
                 if "@" in m: mp, dp = m.rsplit("@", 1)
                 else: mp, dp = m, None
-                h, a = parse_match(mp)
-                if not h or not a:
-                    st.warning(f"无法解析：{m}")
-                    continue
                 try:
-                    r, err = analyze_match(h, a, dp)
+                    if fid_used:
+                        # 有 fixture_id → 直接查
+                        r, err = analyze_match(None, None, dp, fixture_id=fid_used)
+                    else:
+                        # 无 id → 走搜索流程
+                        h, a = parse_match(mp)
+                        if not h or not a:
+                            st.warning(f"无法解析：{mp}")
+                            continue
+                        r, err = analyze_match(h, a, dp)
                     if err: st.warning(err)
                     else: results.append(r)
                 except Exception as e:
