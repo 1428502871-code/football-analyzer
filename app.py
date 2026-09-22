@@ -9,7 +9,11 @@ import json
 import pickle
 import base64
 import io
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+
+def beijing_now():
+    return datetime.now(timezone.utc) + timedelta(hours=8)
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import log_loss
@@ -604,6 +608,12 @@ def load_training_from_supabase():
             "home_goals": "FTHG", "away_goals": "FTAG",
             "b365_home": "B365H", "b365_draw": "B365D", "b365_away": "B365A",
         })
+        # 关键：补 league_cn 列（train_models 会用到）
+        if "league" in df.columns:
+            df["league_cn"] = df["league"]
+        # 补 season 字段供 train_models 使用
+        if "season" in df.columns:
+            df["season"] = df["season"].astype(str)
         # 用 Avg 或 Pinnacle 补缺失
         if "avg_home" in df.columns:
             df["B365H"] = df["B365H"].fillna(df["avg_home"])
