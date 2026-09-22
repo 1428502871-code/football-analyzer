@@ -253,6 +253,171 @@ def optimize_weights(n_iter=800):
             best_w = cand
     return current_w, current_loss, best_w, best_loss, len(samples)
 
+def build_optimization_matrix():
+    """构建优化矩阵。特征12个：5核心系数 + 3扩展系数 + 4位置缺阵差"""
+    history = load_history(1000)
+    X_rows, y_rows, details = [], [], []
+    result_map = {"主胜": 0, "平局": 1, "客胜": 2}
+    for h in history:
+        if not h.get("actual_result"): continue
+        try:
+            coefs = json.loads(h.get("coefs_json") or "{}")
+            ij = h.get("injuries_json")
+            h_pos = {"GK": 0, "DEF": 0, "MID": 0, "ATT": 0}
+            a_pos = {"GK": 0, "DEF": 0, "MID": 0, "ATT": 0}
+            if ij:
+                parsed = parse_injury_positions(ij)
+                if parsed:
+                    h_pos, a_pos = parsed
+            feats = [
+                coefs.get("injury", 0), coefs.get("home_away", 0),
+                coefs.get("h2h", 0), coefs.get("form", 0), coefs.get("motivation", 0),
+                coefs.get("schedule", 0), coefs.get("travel", 0), coefs.get("eu_pressure", 0),
+                h_pos["GK"] - a_pos["GK"], h_pos["DEF"] - a_pos["DEF"],
+                h_pos["MID"] - a_pos["MID"], h_pos["ATT"] - a_pos["ATT"],
+            ]
+            X_rows.append(feats)
+            y_rows.append(result_map[h["actual_result"]])
+            details.append({
+                "odds": (float(h["home_odds"]), float(h["draw_odds"]), float(h["away_odds"])),
+                "coefs": coefs, "h_pos": h_pos, "a_pos": a_pos,
+                "mw": MARKET_FUSION_MAP.get(h.get("league") or "普通", 0.55),
+                "y": result_map[h["actual_result"]],
+            })
+        except Exception:
+            continue
+    if len(X_rows) < 30:
+        return None
+    return np.array(X_rows), np.array(y_rows), details
+
+
+def optimize_all_with_ml(n_search=400):
+    """LR + XGBoost 联合优化所有系数"""
+    built = build_optimization_matrix()
+    if built is None:
+        return None
+    X, y, details = built
+    n_samples = len(X)
+    split = int(n_samples * 0.8)
+    X_tr, X_te = X[:split], X[split:]
+    y_tr, y_te = y[:split], y[split:]
+    scaler = StandardScaler()
+    X_tr_s = scaler.fit_transform(X_tr)
+    X_te_s = scaler.transform(X_te)
+
+    try:
+        lr = LogisticRegression(multi_class='multinomial', solver='lbfgs',
+                                max_iter=1000, class_weight='balanced')
+        lr.fit(X_tr_s, y_tr)
+        lr_loss = float(log_loss(y_te, lr.predict_proba(X_te_s)))
+        lr_imp = np.abs(lr.coef_).mean(axis=0)
+        lr_imp = lr_imp / (lr_imp.sum() + 1e-9)
+    except Exception:
+        lr_imp = np.ones(12) / 12
+        lr_loss = 1.0
+
+    try:
+        xgb = XGBClassifier(objective='multi:softprob', num_class=3,
+                            n_estimators=200, max_depth=4, learning_rate=0.05,
+                            subsample=0.8, colsample_bytree=0.8,
+                            eval_metric='mlogloss', verbosity=0, use_label_encoder=False)
+        xgb.fit(X_tr, y_tr)
+        xgb_loss = float(log_loss(y_te, xgb.predict_proba(X_te)))
+        xgb_imp = xgb.feature_importances_
+        xgb_imp = xgb_imp / (xgb_imp.sum() + 1e-9)
+    except Exception:
+        xgb_imp = np.ones(12) / 12
+        xgb_loss = 1.0
+
+    fused = 0.5 * lr_imp + 0.5 * xgb_imp
+    core = fused[:5]; core = core / (core.sum() + 1e-9)
+    ext = 0.3 + fused[5:8] * 2.0
+    pos = 0.7 + fused[8:12] * 2.0
+    initial = {
+        "injury": round(float(core[0]), 2), "home_away": round(float(core[1]), 2),
+        "h2h": round(float(core[2]), 2), "form": round(float(core[3]), 2),
+        "motivation": round(float(core[4]), 2),
+        "schedule": round(float(ext[0]), 2), "travel": round(float(ext[1]), 2),
+        "eu_pressure": round(float(ext[2]), 2),
+        "GK": round(float(pos[0]), 2), "DEF": round(float(pos[1]), 2),
+        "MID": round(float(pos[2]), 2), "ATT": round(float(pos[3]), 2),
+    }
+
+    def evaluate(params):
+        total = 0.0
+        for d in details:
+            c = d["coefs"]; hp = d["h_pos"]; ap = d["a_pos"]
+            h_s = hp["GK"]*params["GK"] + hp["DEF"]*params["DEF"] + hp["MID"]*params["MID"] + hp["ATT"]*params["ATT"]
+            a_s = ap["GK"]*params["GK"] + ap["DEF"]*params["DEF"] + ap["MID"]*params["MID"] + ap["ATT"]*params["ATT"]
+            inj = round(float(np.tanh((a_s - h_s) / 3.0)), 2)
+            base = (inj * params["injury"] + c.get("home_away", 0) * params["home_away"] +
+                    c.get("h2h", 0) * params["h2h"] + c.get("form", 0) * params["form"] +
+                    c.get("motivation", 0) * params["motivation"])
+            ext_a = (c.get("schedule", 0) * params["schedule"] +
+                     c.get("travel", 0) * params["travel"] +
+                     c.get("eu_pressure", 0) * params["eu_pressure"])
+            adjust = base + ext_a * 0.3
+            market_p = np.array(devig(list(d["odds"])))
+            model_p = softmax3(market_p, adjust * 0.7)
+            model_p = model_p * np.array([1 + adjust * 0.15, 1 - adjust * 0.05, 1 - adjust * 0.1])
+            model_p = model_p / model_p.sum()
+            mw = d["mw"]
+            final_p = mw * model_p + (1 - mw) * market_p
+            final_p = final_p / final_p.sum()
+            total += -np.log(max(final_p[d["y"]], 1e-6))
+        return total / len(details)
+
+    initial_loss = evaluate(initial)
+    best = initial.copy(); best_loss = initial_loss
+    rng = np.random.default_rng(42)
+    for _ in range(n_search):
+        cand = initial.copy()
+        for k in ["injury", "home_away", "h2h", "form", "motivation"]:
+            cand[k] = round(max(0.05, initial[k] + rng.uniform(-0.04, 0.04)), 2)
+        tw = sum(cand[k] for k in ["injury", "home_away", "h2h", "form", "motivation"])
+        for k in ["injury", "home_away", "h2h", "form", "motivation"]:
+            cand[k] = round(cand[k] / tw, 2)
+        for k in ["schedule", "travel", "eu_pressure"]:
+            cand[k] = round(max(0.2, min(1.5, initial[k] + rng.uniform(-0.15, 0.15))), 2)
+        for k in ["GK", "DEF", "MID", "ATT"]:
+            cand[k] = round(max(0.5, min(2.0, initial[k] + rng.uniform(-0.15, 0.15))), 2)
+        loss = evaluate(cand)
+        if loss < best_loss:
+            best_loss = loss; best = cand
+
+    best_alpha = 0.55; best_alpha_loss = 999
+    for alpha in [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80]:
+        total = 0.0
+        for d in details:
+            c = d["coefs"]; hp = d["h_pos"]; ap = d["a_pos"]
+            h_s = hp["GK"]*best["GK"] + hp["DEF"]*best["DEF"] + hp["MID"]*best["MID"] + hp["ATT"]*best["ATT"]
+            a_s = ap["GK"]*best["GK"] + ap["DEF"]*best["DEF"] + ap["MID"]*best["MID"] + ap["ATT"]*best["ATT"]
+            inj = round(float(np.tanh((a_s - h_s) / 3.0)), 2)
+            base = (inj * best["injury"] + c.get("home_away", 0) * best["home_away"] +
+                    c.get("h2h", 0) * best["h2h"] + c.get("form", 0) * best["form"] +
+                    c.get("motivation", 0) * best["motivation"])
+            ext_a = (c.get("schedule", 0) * best["schedule"] +
+                     c.get("travel", 0) * best["travel"] +
+                     c.get("eu_pressure", 0) * best["eu_pressure"])
+            adjust = base + ext_a * 0.3
+            market_p = np.array(devig(list(d["odds"])))
+            model_p = softmax3(market_p, adjust * 0.7)
+            model_p = model_p * np.array([1 + adjust * 0.15, 1 - adjust * 0.05, 1 - adjust * 0.1])
+            model_p = model_p / model_p.sum()
+            final_p = alpha * model_p + (1 - alpha) * market_p
+            final_p = final_p / final_p.sum()
+            total += -np.log(max(final_p[d["y"]], 1e-6))
+        avg = total / len(details)
+        if avg < best_alpha_loss:
+            best_alpha_loss = avg; best_alpha = alpha
+
+    return {"lr_loss": lr_loss, "xgb_loss": xgb_loss,
+            "initial": initial, "best": best,
+            "initial_loss": initial_loss, "best_loss": best_loss,
+            "best_alpha": best_alpha, "best_alpha_loss": best_alpha_loss,
+            "n_samples": n_samples}
+
+
 
 def calc_calibration():
     try:
@@ -502,6 +667,7 @@ def current_season():
 def _base_params():
     return {"weights": {"injury": 0.20, "home_away": 0.20, "h2h": 0.18, "form": 0.21, "motivation": 0.21},
         "extended_weights": {"schedule": 0.5, "travel": 0.3, "eu_pressure": 0.5},
+        "injury_position_weights": {"Goalkeeper": 1.2, "Defender": 1.1, "Midfielder": 1.0, "Attacker": 1.1},
         "model_fusion": {"lr": 0.45, "xgb": 0.55}, "market_fusion_override": None}
 
 
@@ -811,8 +977,9 @@ def get_standings_safe(league_id):
         return []
 
 
-def calc_injury_coef(injuries, home_id, away_id):
-    pos_w = {"Goalkeeper": 1.2, "Defender": 1.1, "Midfielder": 1.0, "Attacker": 1.1}
+def calc_injury_coef(injuries, home_id, away_id, pos_w=None):
+    if pos_w is None:
+        pos_w = {"Goalkeeper": 1.2, "Defender": 1.1, "Midfielder": 1.0, "Attacker": 1.1}
     hs, as_ = 0, 0
     for inj in injuries:
         t_id = inj["team"]["id"]
@@ -988,7 +1155,8 @@ def analyze_match(home_name, away_name, date_hint=None, fixture_id=None):
     try: standings = get_standings_safe(lid)
     except Exception: standings = []
 
-    inj_coef, _, _ = calc_injury_coef(injuries, hid, aid)
+        pos_w = st.session_state.get("params", {}).get("default", {}).get("injury_position_weights", None)
+    inj_coef, _, _ = calc_injury_coef(injuries, hid, aid, pos_w=pos_w)
     h2h_coef = calc_h2h_coef(h2h, hid)
     form_coef = calc_form_diff(hr, ar, hid, aid)
 
@@ -1378,39 +1546,65 @@ with tab2:
         if br["total"] == 0: st.success("🎉 全部补抓完成")
         else: st.info("继续点【开始补抓】处理下一批")
 
-    st.markdown("---")
-    st.subheader("🔬 参数优化建议")
-    if st.button("🚀 开始优化", type="primary"):
-        with st.spinner("正在跑 800 次随机搜索..."):
-            res = optimize_weights(n_iter=800)
-        if res is None: st.error("有效样本不足 30 场")
-        else: st.session_state["opt_result"] = res
+         st.markdown("---")
+    st.subheader("🔬 一键联合优化（LR + XGBoost）")
+    st.caption("一次点击优化：5项核心系数 + 3项扩展系数 + 4项位置伤停系数 + 市场融合α（约10-20秒）")
+
+    if st.button("🚀 一键联合优化", type="primary"):
+        with st.spinner("正在跑 LR + XGBoost 联合优化..."):
+            res = optimize_all_with_ml(n_search=400)
+        if res is None:
+            st.error("有效样本不足 30 场（需已回填赛果 + 有伤停明细）")
+        else:
+            st.session_state["opt_result"] = res
+
     if st.session_state.get("opt_result"):
-        cw, cl, bw, bl, n = st.session_state["opt_result"]
-        st.success(f"✅ 用 {n} 场已回填比赛完成优化")
-        df_opt = pd.DataFrame({
-            "系数": ["伤停","主客场","H2H","近期状态","战意","赛程密度","旅途疲劳","欧战压制"],
-            "当前": [cw["injury"], cw["home_away"], cw["h2h"], cw["form"], cw["motivation"],
-                     cw["schedule"], cw["travel"], cw["eu_pressure"]],
-            "建议": [bw["injury"], bw["home_away"], bw["h2h"], bw["form"], bw["motivation"],
-                     bw["schedule"], bw["travel"], bw["eu_pressure"]],
+        r = st.session_state["opt_result"]
+        st.success(f"✅ 用 {r['n_samples']} 场数据完成联合优化")
+
+        ini = r["initial"]; bw = r["best"]
+        df_full = pd.DataFrame({
+            "参数": ["伤停", "主客场", "H2H", "近期状态", "战意",
+                     "赛程密度", "旅途疲劳", "欧战压制",
+                     "门将 GK", "后卫 DEF", "中场 MID", "前锋 ATT"],
+            "LR/XGB初值": [ini["injury"], ini["home_away"], ini["h2h"], ini["form"], ini["motivation"],
+                          ini["schedule"], ini["travel"], ini["eu_pressure"],
+                          ini["GK"], ini["DEF"], ini["MID"], ini["ATT"]],
+            "搜索最优": [bw["injury"], bw["home_away"], bw["h2h"], bw["form"], bw["motivation"],
+                        bw["schedule"], bw["travel"], bw["eu_pressure"],
+                        bw["GK"], bw["DEF"], bw["MID"], bw["ATT"]],
         })
-        df_opt["变化"] = (df_opt["建议"] - df_opt["当前"]).round(2).apply(lambda x: f"{x:+.2f}" if x != 0 else "0.00")
-        st.dataframe(df_opt, hide_index=True)
-        c1, c2, c3 = st.columns(3)
-        c1.metric("当前 LogLoss", f"{cl:.4f}")
-        c2.metric("建议 LogLoss", f"{bl:.4f}")
-        c3.metric("改善", f"{cl-bl:+.4f}")
-        if cl - bl < 0.002: st.warning("⚠️ 改善幅度 < 0.002，建议保持当前参数")
-        if st.button("💾 采纳建议参数", type="primary"):
-            st.session_state["params"]["default"]["weights"] = {
-                "injury": bw["injury"], "home_away": bw["home_away"], "h2h": bw["h2h"],
-                "form": bw["form"], "motivation": bw["motivation"]}
-            st.session_state["params"]["default"]["extended_weights"] = {
-                "schedule": bw["schedule"], "travel": bw["travel"], "eu_pressure": bw["eu_pressure"]}
-            st.success("✅ 已采纳")
-            st.session_state["opt_result"] = None
-            st.rerun()
+        df_full["变化"] = (df_full["搜索最优"] - df_full["LR/XGB初值"]).round(2).apply(
+            lambda x: f"{x:+.2f}" if x != 0 else "0.00")
+        st.dataframe(df_full, hide_index=True)
+
+        st.markdown("**LogLoss 对比**")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("LR 单独", f"{r['lr_loss']:.4f}")
+        c2.metric("XGB 单独", f"{r['xgb_loss']:.4f}")
+        c3.metric("初值 LogLoss", f"{r['initial_loss']:.4f}")
+        c4.metric("优化 LogLoss", f"{r['best_loss']:.4f}",
+                  f"{r['initial_loss']-r['best_loss']:+.4f}")
+
+        st.markdown(f"**最优市场融合 α**：{r['best_alpha']:.2f}（α 越高越信模型，越低越信市场）")
+        st.caption(f"对应 LogLoss：{r['best_alpha_loss']:.4f}")
+
+        if r["initial_loss"] - r["best_loss"] < 0.002:
+            st.warning("⚠️ 改善幅度 < 0.002，建议保持当前参数，继续攒样本")
+        else:
+            if st.button("💾 全部采纳", type="primary"):
+                st.session_state["params"]["default"]["weights"] = {
+                    "injury": bw["injury"], "home_away": bw["home_away"],
+                    "h2h": bw["h2h"], "form": bw["form"], "motivation": bw["motivation"]}
+                st.session_state["params"]["default"]["extended_weights"] = {
+                    "schedule": bw["schedule"], "travel": bw["travel"],
+                    "eu_pressure": bw["eu_pressure"]}
+                st.session_state["params"]["default"]["injury_position_weights"] = {
+                    "Goalkeeper": bw["GK"], "Defender": bw["DEF"],
+                    "Midfielder": bw["MID"], "Attacker": bw["ATT"]}
+                st.success("✅ 已全部采纳，后续分析使用新参数")
+                st.session_state["opt_result"] = None
+                st.rerun()
 
     st.markdown("---")
     st.subheader("⚙️ 参数调优（联赛差异化）")
