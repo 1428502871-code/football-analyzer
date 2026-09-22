@@ -377,31 +377,42 @@ def _base_params():
 
 def get_default_params():
     default = _base_params()
-    by_league = {lg: copy.deepcopy(default) for lg in SUPPORTED_LEAGUES}
-    by_league["英超"]["weights"] = {"injury": 0.22, "home_away": 0.20, "h2h": 0.15, "form": 0.22, "motivation": 0.21}
-    by_league["德甲"]["weights"] = {"injury": 0.20, "home_away": 0.20, "h2h": 0.15, "form": 0.24, "motivation": 0.21}
-    by_league["意甲"]["weights"] = {"injury": 0.21, "home_away": 0.19, "h2h": 0.16, "form": 0.21, "motivation": 0.23}
-    by_league["西甲"]["weights"] = {"injury": 0.19, "home_away": 0.20, "h2h": 0.20, "form": 0.21, "motivation": 0.20}
-    by_league["法甲"]["weights"] = {"injury": 0.21, "home_away": 0.18, "h2h": 0.17, "form": 0.22, "motivation": 0.22}
-    by_league["挪超"]["weights"] = {"injury": 0.18, "home_away": 0.28, "h2h": 0.15, "form": 0.22, "weightsmotivation": 0.17}
-    by"_league["瑞超"]["weights"] = {" ininjury": 0.18, params "home_away else": 0.28, "h2h": 0.15, "form": 0.22, "motivation": 0.17}
-    by_league["丹超"]["weights"] = {"injury": 0.19, "home_away": 0.26, "h2h": 0.15, "form": 0.22, "motivation": 0.18}
-    by_league["芬超"]["weights"] = {"injury": 0.18, "home_away": 0.28, "h2h": 0.13, "form": 0.23, "motivation": 0.18}
-    by_league["欧冠"]["weights"] = {"injury": 0.24, "home_away": 0.18, "h2h": 0.18, "form": 0.22, "motivation": 0.18}
-    by_league["欧联"]["weights"] = {"injury": 0.22, "home_away": 0.19, "h2h": 0.18, "form": 0.23, "motivation": 0.18}
-    by_league["欧协联"]["weights"] = {"injury": 0.22, "home_away": 0.19, "h2h": 0.18, "form": 0.23, "motivation": 0.18}
-    by_league["欧冠"]["extended_weights"] = {"schedule": 0.6, "travel": 0.4, "eu_pressure": 0.8}
-    by_league["欧联"]["extended_weights"] = {"schedule": 0.6, "travel": 0.4, "eu_pressure": 0.8}
-    by_league["欧协联"]["extended_weights"] = {"schedule": 0.5, "travel": 0.4, "eu_pressure": 0.7}
-    by_league["挪超"]["extended_weights"] = {"schedule": 0.5, "travel": 0.6, "eu_pressure": 0.5}
-    by_league["瑞超"]["extended_weights"] = {"schedule": 0.5, "travel": 0.6, "eu_pressure": 0.5}
-    by_league["芬超"]["extended_weights"] = {"schedule": 0.5, "travel": 0.7, "eu_pressure": 0.5}
+    weight_overrides = {
+        "英超": {"injury": 0.22, "home_away": 0.20, "h2h": 0.15, "form": 0.22, "motivation": 0.21},
+        "德甲": {"injury": 0.20, "home_away": 0.20, "h2h": 0.15, "form": 0.24, "motivation": 0.21},
+        "意甲": {"injury": 0.21, "home_away": 0.19, "h2h": 0.16, "form": 0.21, "motivation": 0.23},
+        "西甲": {"injury": 0.19, "home_away": 0.20, "h2h": 0.20, "form": 0.21, "motivation": 0.20},
+        "法甲": {"injury": 0.21, "home_away": 0.18, "h2h": 0.17, "form": 0.22, "motivation": 0.22},
+        "挪超": {"injury": 0.18, "home_away": 0.28, "h2h": 0.15, "form": 0.22, "motivation": 0.17},
+        "瑞超": {"injury": 0.18, "home_away": 0.28, "h2h": 0.15, "form": 0.22, "motivation": 0.17},
+        "丹超": {"injury": 0.19, "home_away": 0.26, "h2h": 0.15, "form": 0.22, "motivation": 0.18},
+        "芬超": {"injury": 0.18, "home_away": 0.28, "h2h": 0.13, "form": 0.23, "motivation": 0.18},
+        "欧冠": {"injury": 0.24, "home_away": 0.18, "h2h": 0.18, "form": 0.22, "motivation": 0.18},
+        "欧联": {"injury": 0.22, "home_away": 0.19, "h2h": 0.18, "form": 0.23, "motivation": 0.18},
+        "欧协联": {"injury": 0.22, "home_away": 0.19, "h2h": 0.18, "form": 0.23, "motivation": 0.18},
+    }
+    ext_overrides = {
+        "欧冠": {"schedule": 0.6, "travel": 0.4, "eu_pressure": 0.8},
+        "欧联": {"schedule": 0.6, "travel": 0.4, "eu_pressure": 0.8},
+        "欧协联": {"schedule": 0.5, "travel": 0.4, "eu_pressure": 0.7},
+        "挪超": {"schedule": 0.5, "travel": 0.6, "eu_pressure": 0.5},
+        "瑞超": {"schedule": 0.5, "travel": 0.6, "eu_pressure": 0.5},
+        "芬超": {"schedule": 0.5, "travel": 0.7, "eu_pressure": 0.5},
+    }
+    by_league = {}
+    for lg in SUPPORTED_LEAGUES:
+        p = copy.deepcopy(default)
+        if lg in weight_overrides:
+            p["weights"] = weight_overrides[lg]
+        if lg in ext_overrides:
+            p["extended_weights"] = ext_overrides[lg]
+        by_league[lg] = p
     return {"default": default, "by_league": by_league}
 
 
 def get_params_for_league(params, league_cn):
     if not isinstance(params, dict) or "by_league" not in params:
-        return params if " _base_params()
+        return params if "weights" in params else _base_params()
     if league_cn in params["by_league"]: return params["by_league"][league_cn]
     return params["default"]
 
@@ -1038,7 +1049,6 @@ with tab1:
                     continue
             prog.empty()
 
-            # ★★★ 关键改动：成功列表先展示，失败折叠框放最后且默认折叠
             if results:
                 st.success(f"✅ 成功 {len(results)} 场 | ⚠️ 失败 {len(failures)} 场（详情在页面底部）")
                 st.session_state["results"] = results
@@ -1064,7 +1074,6 @@ with tab1:
             else:
                 st.error(f"全部失败（{len(failures)} 场）。最常见原因：**赔率已下架**（3 天前的比赛赔率没有）。请搜今天/明天的比赛。")
 
-            # 失败折叠框：放最后，默认折叠
             if failures:
                 with st.expander(f"⚠️ {len(failures)} 场失败（点击查看详情）", expanded=False):
                     for fm, fe in failures[:200]:
