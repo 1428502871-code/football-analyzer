@@ -96,7 +96,6 @@ def update_result(record_id, actual_result):
 
 
 def update_injuries(match_id, injuries_json):
-    """按 match_id 更新 injuries_json"""
     engine = get_db_engine()
     if not engine: return False
     try:
@@ -111,23 +110,17 @@ def update_injuries(match_id, injuries_json):
 
 
 def backfill_injuries(batch_size=50):
-    """补抓历史记录的伤停明细"""
     history = load_history(1000)
     targets = [h for h in history if (not h.get("injuries_json")) and h.get("match_id")]
     targets = targets[:batch_size]
-
-    success = 0
-    no_data = 0
-    fail = 0
+    success = 0; no_data = 0; fail = 0
     results = []
     prog = st.progress(0)
-
     for i, h in enumerate(targets):
         mid = h["match_id"]
         match_name = h.get("match_name", "")
         prog.progress((i + 1) / len(targets), text=f"[{i+1}/{len(targets)}] {match_name}")
         try:
-            # 1. 查比赛（拿主客队 ID）
             r = requests.get(f"{BASE_URL}/fixtures", headers=HEADERS, params={"id": mid}, timeout=10)
             data = r.json()
             if not data.get("response"):
@@ -137,18 +130,13 @@ def backfill_injuries(batch_size=50):
             fx = data["response"][0]
             home_id = fx["teams"]["home"]["id"]
             away_id = fx["teams"]["away"]["id"]
-
-            # 2. 查伤停
             r = requests.get(f"{BASE_URL}/injuries", headers=HEADERS, params={"fixture": mid}, timeout=10)
             inj = r.json().get("response", [])
-
             if not inj:
                 no_data += 1
                 update_injuries(mid, "[]")
                 results.append({"比赛": match_name, "伤停数": 0, "状态": "⚪ 无记录"})
                 continue
-
-            # 3. 组装明细
             inj_list = []
             for item in inj:
                 t_id = item["team"]["id"]
@@ -156,25 +144,16 @@ def backfill_injuries(batch_size=50):
                 p = item["player"]
                 raw_pos = p.get("position", "") or ""
                 reason = p.get("reason", item.get("type", "")) or ""
-                inj_list.append({
-                    "球队": team_cn,
-                    "球员": p.get("name", ""),
-                    "位置": translate_position(raw_pos),
-                    "角色": "未知",
-                    "原因": translate_injury_reason(reason),
-                    "状态": "伤病",
-                    "赛季黄牌": 0,
-                    "赛季红牌": 0,
-                    "raw_position": raw_pos,
-                    "minutes": 0,
-                })
+                inj_list.append({"球队": team_cn, "球员": p.get("name", ""),
+                    "位置": translate_position(raw_pos), "角色": "未知",
+                    "原因": translate_injury_reason(reason), "状态": "伤病",
+                    "赛季黄牌": 0, "赛季红牌": 0, "raw_position": raw_pos, "minutes": 0})
             update_injuries(mid, json.dumps(inj_list, ensure_ascii=False))
             success += 1
             results.append({"比赛": match_name, "伤停数": len(inj_list), "状态": "✅ 已存"})
         except Exception as e:
             fail += 1
             results.append({"比赛": match_name, "伤停数": "-", "状态": f"❌ {str(e)[:30]}"})
-
     prog.empty()
     return {"success": success, "no_data": no_data, "fail": fail,
             "total": len(targets), "results": results}
@@ -258,14 +237,12 @@ def optimize_weights(n_iter=800):
     rng = np.random.default_rng(42)
     for _ in range(n_iter):
         d = rng.dirichlet([1, 1, 1, 1, 1])
-        cand = {
-            "injury": round(float(d[0]), 2), "home_away": round(float(d[1]), 2),
+        cand = {"injury": round(float(d[0]), 2), "home_away": round(float(d[1]), 2),
             "h2h": round(float(d[2]), 2), "form": round(float(d[3]), 2),
             "motivation": round(float(d[4]), 2),
             "schedule": round(float(rng.uniform(0.2, 1.0)), 2),
             "travel": round(float(rng.uniform(0.1, 0.8)), 2),
-            "eu_pressure": round(float(rng.uniform(0.2, 1.0)), 2),
-        }
+            "eu_pressure": round(float(rng.uniform(0.2, 1.0)), 2)}
         loss = evaluate(cand)
         if loss < best_loss:
             best_loss = loss
@@ -551,10 +528,8 @@ def get_default_params():
     by_league = {}
     for lg in SUPPORTED_LEAGUES:
         p = copy.deepcopy(default)
-        if lg in weight_overrides:
-            p["weights"] = weight_overrides[lg]
-        if lg in ext_overrides:
-            p["extended_weights"] = ext_overrides[lg]
+        if lg in weight_overrides: p["weights"] = weight_overrides[lg]
+        if lg in ext_overrides: p["extended_weights"] = ext_overrides[lg]
         by_league[lg] = p
     return {"default": default, "by_league": by_league}
 
@@ -844,7 +819,7 @@ def calc_injury_coef(injuries, home_id, away_id):
     return round(np.tanh((as_ - hs) / 3.0), 2), hs, as_
 
 
-def calc_h23h_coef(h2h_matches, home_id):
+def calc_h2h_coef(h2h_matches, home_id):
     decay = [1.0, 0.7, 0.5, 0.3, 0.2]
     score = 0
     for i, m in enumerate(h2h_matches[:5]):
@@ -910,7 +885,7 @@ def calc_all_probs(odds, coefs, league_id, params, league_name="",
             lr_p = softmax3(market_p, adjust * 0.5)
             xgb_p = softmax3(market_p, adjust * 1.0)
     except Exception:
-        lr_p = softmax(market_p, adjust * 0.5)
+        lr_p = softmax3(market_p, adjust * 0.5)
         xgb_p = softmax3(market_p, adjust * 1.0)
     model_p = mf["lr"] * lr_p + mf["xgb"] * xgb_p
     model_p = model_p * np.array([1 + adjust * 0.15, 1 - adjust * 0.05, 1 - adjust * 0.1])
@@ -1047,9 +1022,7 @@ def analyze_match(home_name, away_name, date_hint=None, fixture_id=None):
             "yellow": 0, "yellowred": 0, "red": 0}
         raw_pos = inj["player"].get("position", "") or stats["position"]
         reason_cn = translate_injury_reason(inj["player"].get("reason", inj.get("type", "")))
-        y = stats.get("yellow", 0)
-        yr = stats.get("yellowred", 0)
-        rr = stats.get("red", 0)
+        y = stats.get("yellow", 0); yr = stats.get("yellowred", 0); rr = stats.get("red", 0)
         reason_lower = (inj["player"].get("reason") or inj.get("type") or "").lower()
         if "red" in reason_lower or rr > 0: status = "🔴 红牌停赛"
         elif "yellow" in reason_lower or "suspended" in reason_lower: status = "🟨 累积黄牌停赛"
@@ -1119,8 +1092,7 @@ with tab1:
                 fid = f["fixture"]["id"]
                 home_en = f["teams"]["home"]["name"]
                 away_en = f["teams"]["away"]["name"]
-                hc = en_to_cn(home_en)
-                ac = en_to_cn(away_en)
+                hc = en_to_cn(home_en); ac = en_to_cn(away_en)
                 lc = LEAGUE_MAP[f["league"]["id"]][2]
                 ts = f["fixture"]["date"][11:16]
                 opt = f"[{lc}] {hc} vs {ac} ({ts})"
@@ -1139,12 +1111,10 @@ with tab1:
                         if ms and ms not in st.session_state["selected_matches"]:
                             st.session_state["selected_matches"].append(ms)
                             added += 1
-                    st.success(f"成功加入 {added} 场")
-                    st.rerun()
+                    st.success(f"成功加入 {added} 场"); st.rerun()
             with c2:
                 if st.button("🗑️ 清空已加入"):
-                    st.session_state["selected_matches"] = []
-                    st.rerun()
+                    st.session_state["selected_matches"] = []; st.rerun()
             if st.session_state.get("selected_matches"):
                 st.info(f"📋 当前待分析列表：{len(st.session_state['selected_matches'])} 场")
 
@@ -1171,18 +1141,15 @@ with tab1:
         elif not api_key:
             st.error("API Key 未配置")
         else:
-            results = []
-            failures = []
+            results = []; failures = []
             prog = st.progress(0)
             for i, m in enumerate(all_m):
                 prog.progress((i + 1) / len(all_m), text=f"分析中：{m}")
                 fid_used = None
                 if "###" in m:
                     try:
-                        fid_part, m = m.split("###", 1)
-                        fid_used = int(fid_part)
-                    except Exception:
-                        fid_used = None
+                        fid_part, m = m.split("###", 1); fid_used = int(fid_part)
+                    except Exception: fid_used = None
                 if "@" in m: mp, dp = m.rsplit("@", 1)
                 else: mp, dp = m, None
                 try:
@@ -1191,16 +1158,13 @@ with tab1:
                     else:
                         h, a = parse_match(mp)
                         if not h or not a:
-                            failures.append((mp, "无法解析"))
-                            continue
+                            failures.append((mp, "无法解析")); continue
                         r, err = analyze_match(h, a, dp)
                     if err: failures.append((mp, err))
                     else: results.append(r)
                 except Exception as e:
-                    failures.append((mp, f"异常：{e}"))
-                    continue
+                    failures.append((mp, f"异常：{e}")); continue
             prog.empty()
-
             if results:
                 st.success(f"✅ 成功 {len(results)} 场 | ⚠️ 失败 {len(failures)} 场（详情在页面底部）")
                 st.session_state["results"] = results
@@ -1221,12 +1185,10 @@ with tab1:
                             "hs": r["health_score"],
                             "ij": json.dumps(r["injuries"], ensure_ascii=False, default=str)})
                         if ok: saved += 1
-                    except Exception:
-                        continue
+                    except Exception: continue
                 st.success(f"已存库 {saved} 场")
             else:
-                st.error(f"全部失败（{len(failures)} 场）。最常见原因：**赔率已下架**。请搜今天/明天的比赛。")
-
+                st.error(f"全部失败（{len(failures)} 场）。最常见原因：**赔率已下架**。")
             if failures:
                 with st.expander(f"⚠️ {len(failures)} 场失败（点击查看详情）", expanded=False):
                     for fm, fe in failures[:200]:
@@ -1245,8 +1207,7 @@ with tab1:
                         schedule_coef=r.get("schedule_coef", 0.0),
                         travel_coef=r.get("travel_coef", 0.0),
                         eu_pressure=r.get("eu_pressure", 0.0))
-                except Exception:
-                    continue
+                except Exception: continue
                 src = p.get("model_source", "公式")
                 st.markdown(f"### {r['match']}")
                 st.caption(f"🏆 {p['league_cn']} | 来源：{src} | 模型{int(p['model_w']*100)}% / 市场{int(p['market_w']*100)}%")
@@ -1267,8 +1228,7 @@ with tab1:
                                              "位置": translate_position(s.get("player",{}).get("pos","")),
                                              "球员": translate_player(s.get("player",{}).get("name",""))} for s in starters]
                                     st.dataframe(pd.DataFrame(rows), hide_index=True)
-                            except Exception:
-                                continue
+                            except Exception: continue
                     if r.get("referee"):
                         st.markdown(f"### 👨‍⚖️ 主裁判：{r['referee']}")
                     if r.get("standings"):
@@ -1284,8 +1244,7 @@ with tab1:
                                         "积分": team.get("points",0),
                                         "胜/平/负": f"{a.get('win',0)}/{a.get('draw',0)}/{a.get('lose',0)}",
                                         "进球": g.get("for",0), "失球": g.get("against",0)})
-                            except Exception:
-                                continue
+                            except Exception: continue
                         if rows: st.dataframe(pd.DataFrame(rows), hide_index=True)
                     st.markdown(f"**数据健康度：{r['health_score']}%**")
                     for ic, nm, dt in r["health"]:
@@ -1301,8 +1260,7 @@ with tab1:
                     if r["injuries"]:
                         show = [{k:v for k,v in x.items() if k not in ("raw_position","minutes")} for x in r["injuries"]]
                         st.dataframe(pd.DataFrame(show), hide_index=True)
-                    else:
-                        st.caption("无记录")
+                    else: st.caption("无记录")
                     st.markdown("**五层概率**")
                     st.dataframe(pd.DataFrame({"层级": ["LR","XGB","模型融合","市场","最终"],
                         "主胜": [f"{p['lr'][0]}%", f"{p['xgb'][0]}%", f"{p['model'][0]}%", f"{p['market'][0]}%", f"**{p['final'][0]}%**"],
@@ -1332,8 +1290,7 @@ with tab1:
                     cands.append({"match": r["match"], "league": p["league_cn"],
                         "pick": ["主胜","平局","客胜"][mxi],
                         "prob": float(pf[mxi]), "odd": r["odds"][mxi], "health": r["health_score"]})
-            except Exception:
-                continue
+            except Exception: continue
         best, bs = None, 0
         for i in range(len(cands)):
             for j in range(i + 1, len(cands)):
@@ -1354,8 +1311,7 @@ with tab1:
                 st.markdown(f"**🥈 {c2['match']}**")
                 st.markdown(f"**{c2['pick']}** | 概率 {c2['prob']}% | 赔率 {c2['odd']}")
             st.markdown(f"**组合赔率 {to:.2f}**")
-        else:
-            st.warning("⚠️ 今日无符合条件的二串一推荐")
+        else: st.warning("⚠️ 今日无符合条件的二串一推荐")
 
 with tab2:
     st.subheader("🤖 模型训练")
@@ -1366,16 +1322,13 @@ with tab2:
         c1.metric("训练样本", f"{meta.get('samples', 0):,} 场")
         c2.metric("LR LogLoss", f"{meta.get('lr_logloss', 0):.4f}")
         c3.metric("XGB LogLoss", f"{meta.get('xgb_logloss', 0):.4f}")
-    else:
-        st.warning("⚠️ 尚未加载模型。当前分析使用'公式模式'。")
     col_a, col_b = st.columns(2)
     with col_a:
         if st.button("🚀 一键学习", type="primary"):
             with st.spinner("正在下载历史数据并训练模型..."):
                 try:
                     result, metrics = run_full_training()
-                    if result is None:
-                        st.error("训练失败")
+                    if result is None: st.error("训练失败")
                     else:
                         blob = serialize_model(*result)
                         save_model_to_db(blob, metrics)
@@ -1387,8 +1340,7 @@ with tab2:
                         st.session_state["model_loaded"] = True
                         st.success(f"✅ 训练完成！样本 {metrics['samples']:,} 场")
                         st.rerun()
-                except Exception as e:
-                    st.error(f"训练出错：{e}")
+                except Exception as e: st.error(f"训练出错：{e}")
     with col_b:
         if st.button("🗑️ 清除当前模型"):
             st.session_state["model_loaded"] = False
@@ -1399,21 +1351,17 @@ with tab2:
                 try:
                     from sqlalchemy import text
                     with engine.connect() as conn:
-                        conn.execute(text("DELETE FROM model_storage"))
-                        conn.commit()
-                except Exception:
-                    pass
+                        conn.execute(text("DELETE FROM model_storage")); conn.commit()
+                except Exception: pass
             st.success("已清除"); st.rerun()
 
     st.markdown("---")
     st.subheader("📥 补抓历史伤停明细")
-    st.caption("对还没存 injuries_json 的比赛，从 API 补抓伤停明细。每场消耗 2 次 API 调用。")
-    bf_limit = st.number_input("本次补抓数量（每次最多 50 场）", min_value=10, max_value=50, value=50, step=10)
+    bf_limit = st.number_input("本次补抓数量（10-50 场）", min_value=10, max_value=50, value=50, step=10)
     if st.button("🚀 开始补抓", type="primary"):
         with st.spinner("正在补抓..."):
             res = backfill_injuries(batch_size=int(bf_limit))
         st.session_state["backfill_result"] = res
-
     if st.session_state.get("backfill_result"):
         br = st.session_state["backfill_result"]
         c1, c2, c3, c4 = st.columns(4)
@@ -1422,27 +1370,22 @@ with tab2:
         c3.metric("⚪ 无记录", f"{br['no_data']} 场")
         c4.metric("❌ 失败", f"{br['fail']} 场")
         with st.expander("查看明细"):
-            if br["results"]:
-                st.dataframe(pd.DataFrame(br["results"]), hide_index=True)
-        if br["success"] + br["no_data"] > 0:
-            st.success("✅ 本次补抓完成。想继续补抓下一批，再点一次【开始补抓】")
+            if br["results"]: st.dataframe(pd.DataFrame(br["results"]), hide_index=True)
+        if br["total"] == 0: st.success("🎉 全部补抓完成")
+        else: st.info("继续点【开始补抓】处理下一批")
 
     st.markdown("---")
     st.subheader("🔬 参数优化建议")
-    st.caption("用已回填数据随机搜索最优权重（约 10-20 秒）")
     if st.button("🚀 开始优化", type="primary"):
         with st.spinner("正在跑 800 次随机搜索..."):
             res = optimize_weights(n_iter=800)
-        if res is None:
-            st.error("有效样本不足 30 场，无法优化")
-        else:
-            st.session_state["opt_result"] = res
-
+        if res is None: st.error("有效样本不足 30 场")
+        else: st.session_state["opt_result"] = res
     if st.session_state.get("opt_result"):
         cw, cl, bw, bl, n = st.session_state["opt_result"]
         st.success(f"✅ 用 {n} 场已回填比赛完成优化")
         df_opt = pd.DataFrame({
-            "系数": ["伤停", "主客场", "H2H", "近期状态", "战意", "赛程密度", "旅途疲劳", "欧战压制"],
+            "系数": ["伤停","主客场","H2H","近期状态","战意","赛程密度","旅途疲劳","欧战压制"],
             "当前": [cw["injury"], cw["home_away"], cw["h2h"], cw["form"], cw["motivation"],
                      cw["schedule"], cw["travel"], cw["eu_pressure"]],
             "建议": [bw["injury"], bw["home_away"], bw["h2h"], bw["form"], bw["motivation"],
@@ -1453,16 +1396,15 @@ with tab2:
         c1, c2, c3 = st.columns(3)
         c1.metric("当前 LogLoss", f"{cl:.4f}")
         c2.metric("建议 LogLoss", f"{bl:.4f}")
-        c3.metric("改善", f"{cl-bl:+.4f}", delta_color="normal" if cl - bl > 0 else "inverse")
-        if cl - bl < 0.002:
-            st.warning("⚠️ 改善幅度 < 0.002，建议保持当前参数，继续攒样本")
+        c3.metric("改善", f"{cl-bl:+.4f}")
+        if cl - bl < 0.002: st.warning("⚠️ 改善幅度 < 0.002，建议保持当前参数")
         if st.button("💾 采纳建议参数", type="primary"):
             st.session_state["params"]["default"]["weights"] = {
                 "injury": bw["injury"], "home_away": bw["home_away"], "h2h": bw["h2h"],
                 "form": bw["form"], "motivation": bw["motivation"]}
             st.session_state["params"]["default"]["extended_weights"] = {
                 "schedule": bw["schedule"], "travel": bw["travel"], "eu_pressure": bw["eu_pressure"]}
-            st.success("✅ 已采纳，后续分析用新权重")
+            st.success("✅ 已采纳")
             st.session_state["opt_result"] = None
             st.rerun()
 
@@ -1477,7 +1419,6 @@ with tab2:
             st.session_state["params"]["by_league"][scope] = copy.deepcopy(st.session_state["params"]["default"])
         scope_params = st.session_state["params"]["by_league"][scope]; scope_key = scope
     params_now = copy.deepcopy(scope_params)
-
     c1, c2 = st.columns(2)
     with c1:
         params_now["weights"]["injury"] = st.slider(f"{scope} · 伤停", 0.0, 0.5, params_now["weights"]["injury"], 0.01, key=f"inj_{scope}")
@@ -1489,18 +1430,13 @@ with tab2:
         tw = sum(params_now["weights"].values())
         if abs(tw - 1.0) > 0.01: st.warning(f"⚠️ 合计 {tw:.2f}")
         else: st.success(f"✅ 合计 {tw:.2f}")
-
     if "extended_weights" not in params_now:
         params_now["extended_weights"] = {"schedule": 0.5, "travel": 0.3, "eu_pressure": 0.5}
     params_now["extended_weights"]["schedule"] = st.slider(f"{scope} · 赛程", 0.0, 2.0, float(params_now["extended_weights"].get("schedule", 0.5)), 0.05, key=f"sch_{scope}")
     params_now["extended_weights"]["travel"] = st.slider(f"{scope} · 旅途", 0.0, 2.0, float(params_now["extended_weights"].get("travel", 0.3)), 0.05, key=f"trv_{scope}")
     params_now["extended_weights"]["eu_pressure"] = st.slider(f"{scope} · 欧战", 0.0, 2.0, float(params_now["extended_weights"].get("eu_pressure", 0.5)), 0.05, key=f"eu_{scope}")
-
-    if scope_key is None:
-        st.session_state["params"]["default"] = params_now
-    else:
-        st.session_state["params"]["by_league"][scope_key] = params_now
-
+    if scope_key is None: st.session_state["params"]["default"] = params_now
+    else: st.session_state["params"]["by_league"][scope_key] = params_now
     if st.button("🔄 全部恢复出厂"):
         st.session_state["params"] = get_default_params()
         st.success("已重置"); st.rerun()
@@ -1513,8 +1449,7 @@ with tab3:
             with st.spinner("正在检查赛果..."):
                 _n = auto_update_results()
             if _n > 0: st.success(f"✅ 已自动回填 {_n} 场比赛赛果")
-        except Exception:
-            pass
+        except Exception: pass
     ca, cb = st.columns([1, 4])
     with ca:
         if st.button("🔄 手动检查赛果"):
@@ -1522,8 +1457,7 @@ with tab3:
                 n = auto_update_results()
                 st.success(f"已更新 {n} 场"); st.rerun()
     history = load_history(1000)
-    if not history:
-        st.info("暂无历史记录")
+    if not history: st.info("暂无历史记录")
     else:
         st.success(f"共 {len(history)} 条")
         fin = [h for h in history if h.get("actual_result")]
@@ -1536,8 +1470,7 @@ with tab3:
                     if isinstance(f, list) and len(f) == 3:
                         pred = ["主胜","平局","客胜"][int(np.argmax(f))]
                         if pred == h["actual_result"]: hits += 1
-                except Exception:
-                    pass
+                except Exception: pass
             rate = hits / len(fin) * 100
             st.metric("模型命中率", f"{rate:.1f}%", f"已回填 {len(fin)} 场")
         for h in history[:100]:
@@ -1550,8 +1483,7 @@ with tab3:
                     f = pj.get("final")
                     if isinstance(f, list) and len(f) == 3:
                         st.markdown(f"最终概率：主 **{f[0]}%** / 平 **{f[1]}%** / 客 **{f[2]}%**")
-                except Exception:
-                    pass
+                except Exception: pass
                 if h.get("actual_result"):
                     st.success(f"✅ 赛果：{h['actual_result']}")
                 else:
@@ -1569,18 +1501,14 @@ with tab3:
 with tab4:
     st.subheader("📈 概率校准分析")
     cal = calc_calibration()
-    if cal is None:
-        st.info("样本不足 10 场")
+    if cal is None: st.info("样本不足 10 场")
     else:
         st.dataframe(pd.DataFrame(cal), hide_index=True)
         for row in cal:
             dev = row["偏差"]
-            if abs(dev) < 5:
-                st.markdown(f"✅ **{row['概率区间']}**：{row['预测均值']}% → 实际 {row['实际主胜率']}%（准确）")
-            elif dev > 5:
-                st.markdown(f"⚠️ **{row['概率区间']}**：{row['预测均值']}% → 实际 {row['实际主胜率']}%（低估）")
-            else:
-                st.markdown(f"⚠️ **{row['概率区间']}**：{row['预测均值']}% → 实际 {row['实际主胜率']}%（高估）")
+            if abs(dev) < 5: st.markdown(f"✅ **{row['概率区间']}**：{row['预测均值']}% → 实际 {row['实际主胜率']}%（准确）")
+            elif dev > 5: st.markdown(f"⚠️ **{row['概率区间']}**：{row['预测均值']}% → 实际 {row['实际主胜率']}%（低估）")
+            else: st.markdown(f"⚠️ **{row['概率区间']}**：{row['预测均值']}% → 实际 {row['实际主胜率']}%（高估）")
     st.markdown("---")
     st.subheader("📊 历史 LogLoss")
     ol = calc_overall_logloss()
@@ -1592,8 +1520,7 @@ with tab4:
     st.markdown("---")
     st.subheader("📜 训练日志")
     logs = load_training_logs(30)
-    if not logs:
-        st.info("暂无训练记录")
+    if not logs: st.info("暂无训练记录")
     else:
         for log in logs:
             with st.container(border=True):
