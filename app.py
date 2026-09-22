@@ -1365,7 +1365,7 @@ with tab3:
                 n = auto_update_results()
                 st.success(f"已更新 {n} 场")
                 st.rerun()
-    history = load_history(200)
+    history = load_history(1000)
     if not history:
         st.info("暂无历史记录")
     else:
