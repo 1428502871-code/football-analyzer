@@ -6,13 +6,10 @@ import requests
 import numpy as np
 import copy
 import json
-import re
 import pickle
 import base64
 import io
 from datetime import datetime, timedelta
-from scipy.stats import poisson
-from scipy.optimize import minimize
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import log_loss
@@ -409,7 +406,6 @@ def get_params_for_league(params, league_cn):
     return params["default"]
 
 
-# ============ Session 初始化（安全版） ============
 try:
     if "params" not in st.session_state:
         st.session_state["params"] = get_default_params()
@@ -476,6 +472,10 @@ def get_league_info(league_id, league_name_from_api=""):
 
 
 def parse_match(m):
+    if "||" in m:
+        parts = m.split("||", 1)
+        if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+            return parts[0].strip(), parts[1].strip()
     m = m.replace("vs", " ").replace("VS", " ").replace("对", " ").strip()
     sorted_teams = sorted(CN_TEAM_MAP.keys(), key=len, reverse=True)
     used_ranges, matches = [], []
@@ -516,7 +516,11 @@ def search_team(name):
     cleaned = en_name.replace("/", " ").replace("-", " ").replace(".", "").replace("  ", " ").strip()
     if cleaned != en_name: candidates.append(cleaned)
     accents = {"ø": "o", "å": "a", "æ": "ae", "ö": "o", "ä": "a", "ü": "u",
-        "é": "e", "è": "e", "í": "i", "ó": "o", "á": "a", "ñ": "n", "ç": "c"}
+        "é": "e", "è": "e", "í": "i", "ó": "o", "á": "a", "ñ": "n", "ç": "c",
+        "ş": "s", "ğ": "g", "ı": "i", "ł": "l", "ż": "z", "ź": "z", "ś": "s",
+        "č": "c", "ř": "r", "ž": "z", "š": "s", "ď": "d", "ň": "n", "ě": "e",
+        "ő": "o", "ű": "u", "ã": "a", "õ": "o", "â": "a", "ê": "e", "î": "i",
+        "ô": "o", "û": "u", "à": "a", "ì": "i", "ò": "o", "ù": "u"}
     deacc = "".join(accents.get(c.lower(), c) for c in en_name)
     if deacc != en_name: candidates.append(deacc)
     if " " in en_name or "/" in en_name:
@@ -582,35 +586,6 @@ def get_odds(fixture_id):
 
 
 @st.cache_data(ttl=3600)
-def get_asian_handicap(fixture_id):
-    try:
-        r = requests.get(f"{BASE_URL}/odds", headers=HEADERS,
-            params={"fixture": fixture_id, "bookmaker": 2}, timeout=10)
-        data = r.json()
-        if data.get("response"):
-            for bm in data["response"][0].get("bookmakers", []):
-                for bet in bm.get("bets", []):
-                    if bet["id"] == 4:
-                        vals = bet["values"]
-                        for v in vals:
-                            val_str = v.get("value", "")
-                            m = re.search(r'Home\s+([+-]?\d+(?:\.\d+)?)', val_str)
-                            if m:
-                                handicap = float(m.group(1))
-                                home_odd = float(v.get("odd", 0)) or None
-                                away_str2 = val_str.replace("Home", "Away").replace(str(handicap), str(-handicap))
-                                away_odd = None
-                                for v2 in vals:
-                                    if v2.get("value", "") == away_str2:
-                                        away_odd = float(v2.get("odd", 0)) or None
-                                        break
-                                if home_odd: return handicap, home_odd, away_odd
-    except Exception:
-        pass
-    return None, None, None
-
-
-@st.cache_data(ttl=3600)
 def get_injuries(fixture_id):
     try:
         r = requests.get(f"{BASE_URL}/injuries", headers=HEADERS, params={"fixture": fixture_id}, timeout=10)
@@ -667,9 +642,7 @@ def get_recent_form(team_id, last=10):
         return []
 
 
-# ============ 无缓存版本：避免 SessionInfo 初始化冲突 ============
 def get_lineups_safe(fixture_id):
-    """不使用缓存，异常时返回空列表"""
     try:
         r = requests.get(f"{BASE_URL}/fixtures/lineups", headers=HEADERS,
             params={"fixture": fixture_id}, timeout=8)
@@ -680,7 +653,6 @@ def get_lineups_safe(fixture_id):
 
 
 def get_standings_safe(league_id):
-    """不使用缓存，异常时返回空列表"""
     try:
         season = current_season()
         r = requests.get(f"{BASE_URL}/standings", headers=HEADERS,
@@ -794,37 +766,6 @@ def calc_all_probs(odds, coefs, league_id, params, league_name="",
         "ext_adjust": round(ext_adjust, 3)}
 
 
-def fit_poisson_lambdas(p_h, p_d, p_a, max_goals=10):
-    def loss(params):
-        lh, la = params
-        if lh <= 0.05 or la <= 0.05 or lh > 6 or la > 6: return 999
-        ph = pd_ = pa = 0.0
-        for i in range(max_goals):
-            for j in range(max_goals):
-                prob = poisson.pmf(i, lh) * poisson.pmf(j, la)
-                if i > j: ph += prob
-                elif i == j: pd_ += prob
-                else: pa += prob
-        return (ph - p_h) ** 2 + (pd_ - p_d) ** 2 + (pa - p_a) ** 2
-    result = minimize(loss, [1.4, 1.1], method="Nelder-Mead",
-        options={"xatol": 1e-4, "fatol": 1e-6, "maxiter": 200})
-    return float(result.x[0]), float(result.x[1])
-
-
-def calc_handicap_probs(lh, la, handicap, max_goals=12):
-    ph = pd_ = pa = 0.0
-    for i in range(max_goals):
-        for j in range(max_goals):
-            prob = poisson.pmf(i, lh) * poisson.pmf(j, la)
-            diff = i + handicap - j
-            if diff > 0: ph += prob
-            elif abs(diff) < 0.01: pd_ += prob
-            else: pa += prob
-    t = ph + pd_ + pa
-    if t <= 0: return 0, 0, 0
-    return round(ph / t * 100, 1), round(pd_ / t * 100, 1), round(pa / t * 100, 1)
-
-
 def check_data_health(injuries, h2h, h_recent, a_recent, odds):
     checks = []
     checks.append(("✅", "赔率数据", "完整") if odds and odds[0] else ("❌", "赔率数据", "缺失"))
@@ -878,26 +819,18 @@ def analyze_match(home_name, away_name, date_hint=None):
     ar_all = get_recent_form(aid, last=10)
     hr = hr_all[:6]
     ar = ar_all[:6]
-    handicap, ah_h, ah_a = get_asian_handicap(fid)
 
-    # 新增数据（每个都用 try/except 包住，失败返回空）
     lineups = []
-    try:
-        lineups = get_lineups_safe(fid)
-    except Exception:
-        lineups = []
+    try: lineups = get_lineups_safe(fid)
+    except Exception: lineups = []
 
     referee_name = ""
-    try:
-        referee_name = fixture["fixture"].get("referee", "") or ""
-    except Exception:
-        referee_name = ""
+    try: referee_name = fixture["fixture"].get("referee", "") or ""
+    except Exception: referee_name = ""
 
     standings = []
-    try:
-        standings = get_standings_safe(lid)
-    except Exception:
-        standings = []
+    try: standings = get_standings_safe(lid)
+    except Exception: standings = []
 
     inj_coef, _, _ = calc_injury_coef(injuries, hid, aid)
     h2h_coef = calc_h2h_coef(h2h, hid)
@@ -969,8 +902,7 @@ def analyze_match(home_name, away_name, date_hint=None):
 
     return {"match_id": fid, "match": f"{hcn} vs {acn}",
         "league_api": lname, "league_country": lcountry, "league_id": lid,
-        "odds": odds, "coefs": coefs, "handicap": handicap,
-        "ah_home_odd": ah_h, "ah_away_odd": ah_a,
+        "odds": odds, "coefs": coefs,
         "injuries": inj_list, "h2h": h2h_list,
         "home_recent": fmt_recent(hr, hid), "away_recent": fmt_recent(ar, aid),
         "health": health, "health_score": hscore, "home_cn": hcn, "away_cn": acn,
@@ -1006,13 +938,16 @@ with tab1:
             st.success(f"共找到 {len(fixtures)} 场支持的联赛比赛")
             options, o2m = [], {}
             for f in fixtures:
-                hc, ac = en_to_cn(f["teams"]["home"]["name"]), en_to_cn(f["teams"]["away"]["name"])
+                home_en = f["teams"]["home"]["name"]
+                away_en = f["teams"]["away"]["name"]
+                hc = en_to_cn(home_en)
+                ac = en_to_cn(away_en)
                 lc = LEAGUE_MAP[f["league"]["id"]][2]
                 ts = f["fixture"]["date"][11:16]
                 opt = f"[{lc}] {hc} vs {ac} ({ts})"
                 options.append(opt)
                 _d = st.session_state.get("date_fixtures_date", datetime.now().strftime("%Y-%m-%d"))
-                o2m[opt] = f"{hc} {ac}@{_d}"
+                o2m[opt] = f"{home_en}||{away_en}@{_d}"
             sel = st.multiselect("勾选要分析的比赛", options)
             c1, c2 = st.columns(2)
             with c1:
@@ -1033,6 +968,10 @@ with tab1:
                     st.rerun()
             if st.session_state.get("selected_matches"):
                 st.info(f"📋 当前待分析列表：{len(st.session_state['selected_matches'])} 场")
+                with st.expander("查看已加入列表（含格式诊断）"):
+                    for i, sm in enumerate(st.session_state["selected_matches"], 1):
+                        fmt = "✅ 新格式" if "||" in sm else "⚠️ 旧格式（建议清空重新加）"
+                        st.write(f"{i}. {sm}  —  {fmt}")
 
     st.markdown("---")
     st.subheader("📊 手动输入或确认分析列表")
@@ -1118,25 +1057,11 @@ with tab1:
                 src = p.get("model_source", "公式")
                 st.markdown(f"### {r['match']}")
                 st.caption(f"🏆 {p['league_cn']} | 概率来源：{src} → 模型{int(p['model_w']*100)}% / 市场{int(p['market_w']*100)}%")
-                if r["handicap"] is not None:
-                    st.caption(f"🎯 亚盘：主 {r['handicap']:+.2f}（赔率 {r['ah_home_odd']}）")
                 c1, c2, c3 = st.columns(3)
                 c1.metric("主胜", f"{p['final'][0]}%")
                 c2.metric("平局", f"{p['final'][1]}%")
                 c3.metric("客胜", f"{p['final'][2]}%")
-                if r["handicap"] is not None:
-                    with st.container(border=True):
-                        st.markdown("**🎯 让球胜平负**")
-                        mp = devig(r["odds"])
-                        lh, la = fit_poisson_lambdas(mp[0], mp[1], mp[2])
-                        hw, hd, hl = calc_handicap_probs(lh, la, r["handicap"])
-                        cc1, cc2, cc3 = st.columns(3)
-                        cc1.metric(f"让球主胜 ({r['handicap']:+.2f})", f"{hw}%")
-                        cc2.metric("走水", f"{hd}%")
-                        cc3.metric(f"让球客胜 ({-r['handicap']:+.2f})", f"{hl}%")
-                        st.caption(f"泊松 λ：主 {lh:.2f} / 客 {la:.2f}")
                 with st.expander("🔍 数据依据"):
-                    # 首发阵容（安全展示）
                     try:
                         if r.get("lineups"):
                             st.markdown("### ⚽ 首发阵容")
@@ -1160,15 +1085,11 @@ with tab1:
                                     continue
                     except Exception:
                         pass
-
-                    # 裁判
                     try:
                         if r.get("referee"):
                             st.markdown(f"### 👨‍⚖️ 主裁判：{r['referee']}")
                     except Exception:
                         pass
-
-                    # 积分榜
                     try:
                         if r.get("standings"):
                             st.markdown("### 📊 联赛排名（当前）")
@@ -1181,18 +1102,15 @@ with tab1:
                                         all_stats = team.get("all", {})
                                         goals = all_stats.get("goals", {})
                                         rows.append({"排名": team.get("rank", ""),
-                                            "球队": tname_cn,
-                                            "积分": team.get("points", 0),
+                                            "球队": tname_cn, "积分": team.get("points", 0),
                                             "胜/平/负": f"{all_stats.get('win',0)}/{all_stats.get('draw',0)}/{all_stats.get('lose',0)}",
-                                            "进球": goals.get("for", 0),
-                                            "失球": goals.get("against", 0)})
+                                            "进球": goals.get("for", 0), "失球": goals.get("against", 0)})
                                 except Exception:
                                     continue
                             if rows:
                                 st.dataframe(pd.DataFrame(rows), hide_index=True)
                     except Exception:
                         pass
-
                     st.markdown(f"**数据健康度：{r['health_score']}%**")
                     for ic, nm, dt in r["health"]:
                         st.markdown(f"- {ic} **{nm}**：{dt}")
@@ -1236,20 +1154,8 @@ with tab1:
                 mxi = int(np.argmax(pf))
                 if pf[mxi] > 60 and 1.30 <= r["odds"][mxi] <= 2.50 and r["health_score"] >= 80:
                     cands.append({"match": r["match"], "league": p["league_cn"],
-                        "pick": ["主胜", "平局", "客胜"][mxi] + "（胜平负）",
+                        "pick": ["主胜", "平局", "客胜"][mxi],
                         "prob": float(pf[mxi]), "odd": r["odds"][mxi], "health": r["health_score"]})
-                if r["handicap"] is not None and r["ah_home_odd"]:
-                    mp = devig(r["odds"])
-                    lh, la = fit_poisson_lambdas(mp[0], mp[1], mp[2])
-                    hw, hd, hl = calc_handicap_probs(lh, la, r["handicap"])
-                    if hw > hl and hw > 62 and 1.30 <= r["ah_home_odd"] <= 2.50:
-                        cands.append({"match": r["match"], "league": p["league_cn"],
-                            "pick": f"让球主胜 ({r['handicap']:+.2f})",
-                            "prob": hw, "odd": r["ah_home_odd"], "health": r["health_score"]})
-                    elif hl > hw and hl > 62 and r["ah_away_odd"] and 1.30 <= r["ah_away_odd"] <= 2.50:
-                        cands.append({"match": r["match"], "league": p["league_cn"],
-                            "pick": f"让球客胜 ({-r['handicap']:+.2f})",
-                            "prob": hl, "odd": r["ah_away_odd"], "health": r["health_score"]})
             except Exception:
                 continue
         best, bs = None, 0
