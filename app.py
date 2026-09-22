@@ -53,13 +53,16 @@ def get_db_engine():
     except Exception:
         return None
 
-
 def save_to_db(record):
     engine = get_db_engine()
     if not engine: return False
     try:
         from sqlalchemy import text
         with engine.connect() as conn:
+            # 先删除同 match_id 的旧记录
+            conn.execute(text("DELETE FROM analysis_history WHERE match_id = :mid"),
+                         {"mid": record["mid"]})
+            # 再插入新记录
             conn.execute(text("""INSERT INTO analysis_history 
                 (match_id, match_name, league, analysis_time, home_odds, draw_odds, away_odds, 
                  coefs_json, probs_json, health_score, injuries_json)
@@ -68,6 +71,7 @@ def save_to_db(record):
         return True
     except Exception:
         return False
+
 
 
 def load_history(limit=1000):
