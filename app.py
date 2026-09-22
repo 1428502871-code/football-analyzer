@@ -40,6 +40,9 @@ YELLOW_THRESHOLD = {"英超": 5, "英冠": 5, "西甲": 5, "西乙": 5,
 SUPPORTED_LEAGUES = ["英超", "西甲", "德甲", "意甲", "法甲",
     "欧冠", "欧联", "欧协联", "英冠", "德乙", "西乙", "法乙",
     "荷甲", "葡超", "比甲", "苏超", "挪超", "瑞超", "丹超", "芬超"]
+MARKET_FUSION_MAP = {"英超": 0.65, "德甲": 0.65, "意甲": 0.65,
+    "法甲": 0.55, "西甲": 0.55,
+    "欧冠": 0.70, "欧联": 0.70, "欧协联": 0.70}
 
 
 def get_db_engine():
@@ -59,15 +62,15 @@ def save_to_db(record):
         with engine.connect() as conn:
             conn.execute(text("""INSERT INTO analysis_history 
                 (match_id, match_name, league, analysis_time, home_odds, draw_odds, away_odds, 
-                 coefs_json, probs_json, health_score)
-                VALUES (:mid, :mn, :lg, :at, :ho, :do, :ao, :cj, :pj, :hs)"""), record)
+                 coefs_json, probs_json, health_score, injuries_json)
+                VALUES (:mid, :mn, :lg, :at, :ho, :do, :ao, :cj, :pj, :hs, :ij)"""), record)
             conn.commit()
         return True
     except Exception:
         return False
 
 
-def load_history(limit=200):
+def load_history(limit=1000):
     engine = get_db_engine()
     if not engine: return []
     try:
@@ -122,6 +125,72 @@ def auto_update_results():
         except Exception:
             continue
     return updated
+
+
+# ============ 参数优化 ============
+def optimize_weights(n_iter=800):
+    """用历史数据随机搜索最优权重。返回 (current_w, current_loss, best_w, best_loss, n_samples)"""
+    history = load_history(1000)
+    samples = []
+    result_map = {"主胜": 0, "平局": 1, "客胜": 2}
+    for h in history:
+        if not h.get("actual_result"): continue
+        try:
+            coefs = json.loads(h.get("coefs_json") or "{}")
+            ho, do, ao = float(h["home_odds"]), float(h["draw_odds"]), float(h["away_odds"])
+            y = result_map[h["actual_result"]]
+            league = h.get("league") or "普通"
+            mw = MARKET_FUSION_MAP.get(league, 0.55)
+            samples.append({"coefs": coefs, "odds": (ho, do, ao), "y": y, "mw": mw})
+        except Exception:
+            continue
+    if len(samples) < 30:
+        return None
+
+    def evaluate(w):
+        total = 0.0
+        for s in samples:
+            coefs = s["coefs"]
+            market_p = np.array(devig(list(s["odds"])))
+            base_adjust = sum(coefs.get(k, 0) * w.get(k, 0) for k in
+                              ["injury", "home_away", "h2h", "form", "motivation"])
+            ext_adjust = (coefs.get("schedule", 0) * w.get("schedule", 0.5) +
+                          coefs.get("travel", 0) * w.get("travel", 0.3) +
+                          coefs.get("eu_pressure", 0) * w.get("eu_pressure", 0.5))
+            adjust = base_adjust + ext_adjust * 0.3
+            model_p = softmax3(market_p, adjust * 0.7)
+            model_p = model_p * np.array([1 + adjust * 0.15, 1 - adjust * 0.05, 1 - adjust * 0.1])
+            model_p = model_p / model_p.sum()
+            mw = s["mw"]
+            final_p = mw * model_p + (1 - mw) * market_p
+            final_p = final_p / final_p.sum()
+            total += -np.log(max(final_p[s["y"]], 1e-6))
+        return total / len(samples)
+
+    current_w = {"injury": 0.20, "home_away": 0.20, "h2h": 0.18, "form": 0.21, "motivation": 0.21,
+                 "schedule": 0.5, "travel": 0.3, "eu_pressure": 0.5}
+    current_loss = evaluate(current_w)
+
+    best_w = current_w.copy()
+    best_loss = current_loss
+    rng = np.random.default_rng(42)
+    for _ in range(n_iter):
+        d = rng.dirichlet([1, 1, 1, 1, 1])
+        cand = {
+            "injury": round(float(d[0]), 2),
+            "home_away": round(float(d[1]), 2),
+            "h2h": round(float(d[2]), 2),
+            "form": round(float(d[3]), 2),
+            "motivation": round(float(d[4]), 2),
+            "schedule": round(float(rng.uniform(0.2, 1.0)), 2),
+            "travel": round(float(rng.uniform(0.1, 0.8)), 2),
+            "eu_pressure": round(float(rng.uniform(0.2, 1.0)), 2),
+        }
+        loss = evaluate(cand)
+        if loss < best_loss:
+            best_loss = loss
+            best_w = cand
+    return current_w, current_loss, best_w, best_loss, len(samples)
 
 
 def calc_calibration():
@@ -425,6 +494,7 @@ try:
             st.session_state["params"] = get_default_params()
     if "param_versions" not in st.session_state: st.session_state["param_versions"] = []
     if "cache_time" not in st.session_state: st.session_state["cache_time"] = None
+    if "opt_result" not in st.session_state: st.session_state["opt_result"] = None
     if "model_loaded" not in st.session_state:
         st.session_state["model_loaded"] = False
         try:
@@ -906,7 +976,8 @@ def analyze_match(home_name, away_name, date_hint=None, fixture_id=None):
         else: status = "伤病"
         inj_list.append({"球队": team_cn, "球员": translate_player(inj["player"].get("name", "")),
             "位置": translate_position(raw_pos), "角色": classify_role(stats["minutes"], stats["appearences"]),
-            "原因": reason_cn, "状态": status, "赛季黄牌": y, "赛季红牌": rr + yr})
+            "原因": reason_cn, "状态": status, "赛季黄牌": y, "赛季红牌": rr + yr,
+            "raw_position": raw_pos, "minutes": stats.get("minutes", 0)})
 
     h2h_list = [{"日期": m["fixture"]["date"][:10], "主队": en_to_cn(m["teams"]["home"]["name"]),
         "比分": f"{m['goals']['home']}-{m['goals']['away']}",
@@ -1066,20 +1137,19 @@ with tab1:
                             "ho": r["odds"][0], "do": r["odds"][1], "ao": r["odds"][2],
                             "cj": json.dumps(r["coefs"], ensure_ascii=False, default=str),
                             "pj": json.dumps({k: (v.tolist() if hasattr(v, 'tolist') else v) for k, v in p.items()}, ensure_ascii=False, default=str),
-                            "hs": r["health_score"]})
+                            "hs": r["health_score"],
+                            "ij": json.dumps(r["injuries"], ensure_ascii=False, default=str)})
                         if ok: saved += 1
                     except Exception:
                         continue
                 st.success(f"已存库 {saved} 场")
             else:
-                st.error(f"全部失败（{len(failures)} 场）。最常见原因：**赔率已下架**（3 天前的比赛赔率没有）。请搜今天/明天的比赛。")
+                st.error(f"全部失败（{len(failures)} 场）。最常见原因：**赔率已下架**。请搜今天/明天的比赛。")
 
             if failures:
                 with st.expander(f"⚠️ {len(failures)} 场失败（点击查看详情）", expanded=False):
                     for fm, fe in failures[:200]:
                         st.caption(f"· {fm} → {fe}")
-                    if len(failures) > 200:
-                        st.caption(f"... 还有 {len(failures) - 200} 场，省略")
 
     if "results" in st.session_state:
         if st.session_state.get("cache_time"):
@@ -1095,82 +1165,65 @@ with tab1:
                         travel_coef=r.get("travel_coef", 0.0),
                         eu_pressure=r.get("eu_pressure", 0.0))
                 except Exception:
-                    st.warning(f"计算 {r.get('match','?')} 概率时出错")
                     continue
                 src = p.get("model_source", "公式")
                 st.markdown(f"### {r['match']}")
-                st.caption(f"🏆 {p['league_cn']} | 概率来源：{src} → 模型{int(p['model_w']*100)}% / 市场{int(p['market_w']*100)}%")
+                st.caption(f"🏆 {p['league_cn']} | 来源：{src} | 模型{int(p['model_w']*100)}% / 市场{int(p['market_w']*100)}%")
                 c1, c2, c3 = st.columns(3)
                 c1.metric("主胜", f"{p['final'][0]}%")
                 c2.metric("平局", f"{p['final'][1]}%")
                 c3.metric("客胜", f"{p['final'][2]}%")
                 with st.expander("🔍 数据依据"):
-                    try:
-                        if r.get("lineups"):
-                            st.markdown("### ⚽ 首发阵容")
-                            for team_data in r["lineups"]:
-                                try:
-                                    team_obj = team_data.get("team", {})
-                                    team_name = en_to_cn(team_obj.get("name", ""))
-                                    formation = team_data.get("formation", "未知")
-                                    coach = (team_data.get("coach") or {}).get("name", "未知")
-                                    st.markdown(f"**{team_name}** · 阵型 {formation} · 主教练 {coach}")
-                                    starters = team_data.get("startXI", [])
-                                    if starters:
-                                        rows = []
-                                        for s in starters:
-                                            pl = s.get("player", {})
-                                            rows.append({"号码": pl.get("number", ""),
-                                                "位置": translate_position(pl.get("pos", "")),
-                                                "球员": translate_player(pl.get("name", ""))})
-                                        st.dataframe(pd.DataFrame(rows), hide_index=True)
-                                except Exception:
-                                    continue
-                    except Exception:
-                        pass
-                    try:
-                        if r.get("referee"):
-                            st.markdown(f"### 👨‍⚖️ 主裁判：{r['referee']}")
-                    except Exception:
-                        pass
-                    try:
-                        if r.get("standings"):
-                            st.markdown("### 📊 联赛排名（当前）")
-                            rows = []
-                            for team in r["standings"]:
-                                try:
-                                    tname_en = team.get("team", {}).get("name", "")
-                                    tname_cn = en_to_cn(tname_en)
-                                    if tname_cn in [r.get("home_cn", ""), r.get("away_cn", "")]:
-                                        all_stats = team.get("all", {})
-                                        goals = all_stats.get("goals", {})
-                                        rows.append({"排名": team.get("rank", ""),
-                                            "球队": tname_cn, "积分": team.get("points", 0),
-                                            "胜/平/负": f"{all_stats.get('win',0)}/{all_stats.get('draw',0)}/{all_stats.get('lose',0)}",
-                                            "进球": goals.get("for", 0), "失球": goals.get("against", 0)})
-                                except Exception:
-                                    continue
-                            if rows:
-                                st.dataframe(pd.DataFrame(rows), hide_index=True)
-                    except Exception:
-                        pass
+                    if r.get("lineups"):
+                        st.markdown("### ⚽ 首发阵容")
+                        for td in r["lineups"]:
+                            try:
+                                tname = en_to_cn(td.get("team", {}).get("name", ""))
+                                st.markdown(f"**{tname}** · 阵型 {td.get('formation','未知')} · 教练 {(td.get('coach') or {}).get('name','未知')}")
+                                starters = td.get("startXI", [])
+                                if starters:
+                                    rows = [{"号码": s.get("player",{}).get("number",""),
+                                             "位置": translate_position(s.get("player",{}).get("pos","")),
+                                             "球员": translate_player(s.get("player",{}).get("name",""))} for s in starters]
+                                    st.dataframe(pd.DataFrame(rows), hide_index=True)
+                            except Exception:
+                                continue
+                    if r.get("referee"):
+                        st.markdown(f"### 👨‍⚖️ 主裁判：{r['referee']}")
+                    if r.get("standings"):
+                        st.markdown("### 📊 联赛排名（当前）")
+                        rows = []
+                        for team in r["standings"]:
+                            try:
+                                tname_en = team.get("team", {}).get("name", "")
+                                tname_cn = en_to_cn(tname_en)
+                                if tname_cn in [r.get("home_cn", ""), r.get("away_cn", "")]:
+                                    a = team.get("all", {}); g = a.get("goals", {})
+                                    rows.append({"排名": team.get("rank",""), "球队": tname_cn,
+                                        "积分": team.get("points",0),
+                                        "胜/平/负": f"{a.get('win',0)}/{a.get('draw',0)}/{a.get('lose',0)}",
+                                        "进球": g.get("for",0), "失球": g.get("against",0)})
+                            except Exception:
+                                continue
+                        if rows: st.dataframe(pd.DataFrame(rows), hide_index=True)
                     st.markdown(f"**数据健康度：{r['health_score']}%**")
                     for ic, nm, dt in r["health"]:
                         st.markdown(f"- {ic} **{nm}**：{dt}")
                     st.markdown("**扩展特征**")
-                    ecol1, ecol2, ecol3 = st.columns(3)
-                    ecol1.metric("主队休息", f"{r.get('rest_days_home', '未知')} 天")
-                    ecol2.metric("客队休息", f"{r.get('rest_days_away', '未知')} 天")
+                    e1, e2, e3 = st.columns(3)
+                    e1.metric("主队休息", f"{r.get('rest_days_home','未知')} 天")
+                    e2.metric("客队休息", f"{r.get('rest_days_away','未知')} 天")
                     tk = r.get('travel_km')
-                    ecol3.metric("旅途距离", f"{int(tk)} km" if tk else "未知")
-                    st.caption(f"赛程密度系数 {r.get('schedule_coef', 0)} | 旅途疲劳系数 {r.get('travel_coef', 0)} | 欧战压制 {r.get('eu_pressure', 0)}")
+                    e3.metric("旅途距离", f"{int(tk)} km" if tk else "未知")
+                    st.caption(f"赛程 {r.get('schedule_coef',0)} | 旅途 {r.get('travel_coef',0)} | 欧战 {r.get('eu_pressure',0)}")
                     st.markdown("**伤停明细**")
                     if r["injuries"]:
-                        st.dataframe(pd.DataFrame(r["injuries"]), hide_index=True)
+                        show = [{k:v for k,v in x.items() if k != "raw_position" and k != "minutes"} for x in r["injuries"]]
+                        st.dataframe(pd.DataFrame(show), hide_index=True)
                     else:
                         st.caption("无记录")
                     st.markdown("**五层概率**")
-                    st.dataframe(pd.DataFrame({"层级": ["LR", "XGB", "模型融合", "市场", "最终"],
+                    st.dataframe(pd.DataFrame({"层级": ["LR","XGB","模型融合","市场","最终"],
                         "主胜": [f"{p['lr'][0]}%", f"{p['xgb'][0]}%", f"{p['model'][0]}%", f"{p['market'][0]}%", f"**{p['final'][0]}%**"],
                         "平": [f"{p['lr'][1]}%", f"{p['xgb'][1]}%", f"{p['model'][1]}%", f"{p['market'][1]}%", f"**{p['final'][1]}%**"],
                         "客胜": [f"{p['lr'][2]}%", f"{p['xgb'][2]}%", f"{p['model'][2]}%", f"{p['market'][2]}%", f"**{p['final'][2]}%**"]}), hide_index=True)
@@ -1193,11 +1246,10 @@ with tab1:
                     schedule_coef=r.get("schedule_coef", 0.0),
                     travel_coef=r.get("travel_coef", 0.0),
                     eu_pressure=r.get("eu_pressure", 0.0))
-                pf = p["final"]
-                mxi = int(np.argmax(pf))
+                pf = p["final"]; mxi = int(np.argmax(pf))
                 if pf[mxi] > 60 and 1.30 <= r["odds"][mxi] <= 2.50 and r["health_score"] >= 80:
                     cands.append({"match": r["match"], "league": p["league_cn"],
-                        "pick": ["主胜", "平局", "客胜"][mxi],
+                        "pick": ["主胜","平局","客胜"][mxi],
                         "prob": float(pf[mxi]), "odd": r["odds"][mxi], "health": r["health_score"]})
             except Exception:
                 continue
@@ -1271,7 +1323,47 @@ with tab2:
                         conn.commit()
                 except Exception:
                     pass
-            st.success("已清除")
+            st.success("已清除"); st.rerun()
+
+    st.markdown("---")
+    st.subheader("🔬 参数优化建议")
+    st.caption("用已回填的比赛数据，随机搜索让 LogLoss 最低的权重组合（约 10-20 秒）。只优化全局默认参数。")
+    
+    if st.button("🚀 开始优化", type="primary"):
+        with st.spinner("正在跑 800 次随机搜索..."):
+            res = optimize_weights(n_iter=800)
+        if res is None:
+            st.error("有效样本不足 30 场，无法优化")
+        else:
+            st.session_state["opt_result"] = res
+
+    if st.session_state.get("opt_result"):
+        cw, cl, bw, bl, n = st.session_state["opt_result"]
+        st.success(f"✅ 用 {n} 场已回填比赛完成优化")
+        st.markdown("**当前权重 vs 建议权重**")
+        df_opt = pd.DataFrame({
+            "系数": ["伤停", "主客场", "H2H", "近期状态", "战意", "赛程密度", "旅途疲劳", "欧战压制"],
+            "当前": [cw["injury"], cw["home_away"], cw["h2h"], cw["form"], cw["motivation"],
+                     cw["schedule"], cw["travel"], cw["eu_pressure"]],
+            "建议": [bw["injury"], bw["home_away"], bw["h2h"], bw["form"], bw["motivation"],
+                     bw["schedule"], bw["travel"], bw["eu_pressure"]],
+        })
+        df_opt["变化"] = (df_opt["建议"] - df_opt["当前"]).round(2).apply(lambda x: f"{x:+.2f}" if x != 0 else "0.00")
+        st.dataframe(df_opt, hide_index=True)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("当前 LogLoss", f"{cl:.4f}")
+        c2.metric("建议 LogLoss", f"{bl:.4f}")
+        c3.metric("改善", f"{cl-bl:+.4f}", delta_color="normal" if cl - bl > 0 else "inverse")
+        if cl - bl < 0.002:
+            st.warning("⚠️ 改善幅度 < 0.002，建议保持当前参数不动，继续攒样本")
+        if st.button("💾 采纳建议参数", type="primary"):
+            st.session_state["params"]["default"]["weights"] = {
+                "injury": bw["injury"], "home_away": bw["home_away"], "h2h": bw["h2h"],
+                "form": bw["form"], "motivation": bw["motivation"]}
+            st.session_state["params"]["default"]["extended_weights"] = {
+                "schedule": bw["schedule"], "travel": bw["travel"], "eu_pressure": bw["eu_pressure"]}
+            st.success("✅ 已采纳，后续分析用新权重")
+            st.session_state["opt_result"] = None
             st.rerun()
 
     st.markdown("---")
@@ -1285,11 +1377,9 @@ with tab2:
             st.session_state["params"]["by_league"][scope] = copy.deepcopy(st.session_state["params"]["default"])
         scope_params = st.session_state["params"]["by_league"][scope]; scope_key = scope
     if scope_key:
-        default_w = st.session_state["params"]["default"]["weights"]
-        cur_w = scope_params["weights"]
-        diffs = [f"{k}: {default_w[k]:.2f} → {cur_w[k]:.2f}" for k in cur_w if abs(cur_w[k] - default_w[k]) > 0.001]
+        dw = st.session_state["params"]["default"]["weights"]; cw = scope_params["weights"]
+        diffs = [f"{k}: {dw[k]:.2f}→{cw[k]:.2f}" for k in cw if abs(cw[k]-dw[k])>0.001]
         if diffs: st.info(f"与全局默认的差异： {' | '.join(diffs)}")
-        else: st.caption("当前与全局默认一致")
     params_now = copy.deepcopy(scope_params)
 
     st.markdown("**① 五项系数权重**")
@@ -1317,36 +1407,19 @@ with tab2:
     params_now["model_fusion"]["xgb"] = round(1 - params_now["model_fusion"]["lr"], 2)
     st.caption(f"XGB = {params_now['model_fusion']['xgb']}")
 
-    st.markdown("**④ 融合覆盖（可选）**")
-    use_ovr = st.checkbox("启用（忽略联赛默认比例）", value=params_now.get("market_fusion_override") is not None, key=f"ovr_{scope}")
-    if use_ovr:
-        ov = st.slider(f"{scope} · 模型权重", 0.0, 1.0, params_now.get("market_fusion_override") or 0.55, 0.01, key=f"ovv_{scope}")
-        params_now["market_fusion_override"] = ov
-    else:
-        params_now["market_fusion_override"] = None
-
     if scope_key is None:
         st.session_state["params"]["default"] = params_now
     else:
         st.session_state["params"]["by_league"][scope_key] = params_now
 
-    ca, cb, cc = st.columns(3)
+    ca, cb = st.columns(2)
     with ca:
-        if st.button("💾 保存为版本"):
-            st.session_state["param_versions"].append({"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "scope": scope, "params": copy.deepcopy(params_now)})
+        if st.button("💾 保存当前滑块值"):
             st.success(f"已保存（{scope}）")
     with cb:
-        if st.button("↩️ 恢复本范围默认"):
-            if scope_key is None: st.session_state["params"]["default"] = _base_params()
-            else: st.session_state["params"]["by_league"][scope_key] = copy.deepcopy(st.session_state["params"]["default"])
-            st.success("已恢复")
-            st.rerun()
-    with cc:
         if st.button("🔄 全部恢复出厂"):
             st.session_state["params"] = get_default_params()
-            st.success("已重置")
-            st.rerun()
+            st.success("已重置"); st.rerun()
 
 with tab3:
     st.subheader("📚 历史分析记录")
@@ -1363,8 +1436,7 @@ with tab3:
         if st.button("🔄 手动检查赛果"):
             with st.spinner("正在查询..."):
                 n = auto_update_results()
-                st.success(f"已更新 {n} 场")
-                st.rerun()
+                st.success(f"已更新 {n} 场"); st.rerun()
     history = load_history(1000)
     if not history:
         st.info("暂无历史记录")
@@ -1378,13 +1450,13 @@ with tab3:
                     pj = json.loads(h.get("probs_json") or "{}")
                     f = pj.get("final", [])
                     if isinstance(f, list) and len(f) == 3:
-                        pred = ["主胜", "平局", "客胜"][int(np.argmax(f))]
+                        pred = ["主胜","平局","客胜"][int(np.argmax(f))]
                         if pred == h["actual_result"]: hits += 1
                 except Exception:
                     pass
             rate = hits / len(fin) * 100
             st.metric("模型命中率", f"{rate:.1f}%", f"已回填 {len(fin)} 场")
-        for h in history:
+        for h in history[:100]:
             with st.container(border=True):
                 st.markdown(f"**{h.get('match_name','')}** · {h.get('league','')}")
                 st.caption(f"分析时间：{h.get('analysis_time','')} | 健康度：{h.get('health_score',0)}%")
@@ -1395,7 +1467,6 @@ with tab3:
                         st.markdown(f"最终概率：主 **{f[0]}%** / 平 **{f[1]}%** / 客 **{f[2]}%**")
                 except Exception:
                     pass
-                st.markdown(f"赔率：主 {h.get('home_odds')} / 平 {h.get('draw_odds')} / 客 {h.get('away_odds')}")
                 if h.get("actual_result"):
                     st.success(f"✅ 赛果：{h['actual_result']}")
                 else:
@@ -1408,28 +1479,24 @@ with tab3:
                             if st.button("保存", key=f"sv_{h['id']}"):
                                 if res:
                                     update_result(h["id"], res)
-                                    st.success("已保存")
-                                    st.rerun()
+                                    st.success("已保存"); st.rerun()
 
 with tab4:
     st.subheader("📈 概率校准分析")
-    st.caption("校准 = 对比模型给出的概率与实际发生频率。")
     cal = calc_calibration()
     if cal is None:
         st.info("样本不足 10 场，暂无法进行校准分析。")
     else:
-        st.markdown("**主胜概率区间 vs 实际主胜率**")
-        df_cal = pd.DataFrame(cal)
-        st.dataframe(df_cal, hide_index=True)
+        st.dataframe(pd.DataFrame(cal), hide_index=True)
         st.markdown("**判定**")
         for row in cal:
             dev = row["偏差"]
             if abs(dev) < 5:
-                st.markdown(f"✅ **{row['概率区间']}**：预测 {row['预测均值']}% → 实际 {row['实际主胜率']}%（准确）")
+                st.markdown(f"✅ **{row['概率区间']}**：{row['预测均值']}% → 实际 {row['实际主胜率']}%（准确）")
             elif dev > 5:
-                st.markdown(f"⚠️ **{row['概率区间']}**：预测 {row['预测均值']}% → 实际 {row['实际主胜率']}%（低估）")
+                st.markdown(f"⚠️ **{row['概率区间']}**：{row['预测均值']}% → 实际 {row['实际主胜率']}%（低估）")
             else:
-                st.markdown(f"⚠️ **{row['概率区间']}**：预测 {row['预测均值']}% → 实际 {row['实际主胜率']}%（高估）")
+                st.markdown(f"⚠️ **{row['概率区间']}**：{row['预测均值']}% → 实际 {row['实际主胜率']}%（高估）")
     st.markdown("---")
     st.subheader("📊 历史 LogLoss")
     ol = calc_overall_logloss()
@@ -1438,7 +1505,6 @@ with tab4:
         c1, c2 = st.columns(2)
         c1.metric("平均 LogLoss", f"{loss}")
         c2.metric("已回填比赛", f"{n} 场")
-        st.caption("LogLoss 越低越好。0.90 以下优秀，1.00 左右正常，1.10 以上偏弱。")
     else:
         st.info("暂无足够的已回填比赛")
     st.markdown("---")
