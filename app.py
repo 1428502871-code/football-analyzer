@@ -53,16 +53,15 @@ def get_db_engine():
     except Exception:
         return None
 
+
 def save_to_db(record):
     engine = get_db_engine()
     if not engine: return False
     try:
         from sqlalchemy import text
         with engine.connect() as conn:
-            # 先删除同 match_id 的旧记录
             conn.execute(text("DELETE FROM analysis_history WHERE match_id = :mid"),
                          {"mid": record["mid"]})
-            # 再插入新记录
             conn.execute(text("""INSERT INTO analysis_history 
                 (match_id, match_name, league, analysis_time, home_odds, draw_odds, away_odds, 
                  coefs_json, probs_json, health_score, injuries_json)
@@ -71,7 +70,6 @@ def save_to_db(record):
         return True
     except Exception:
         return False
-
 
 
 def load_history(limit=1000):
@@ -195,66 +193,28 @@ def auto_update_results():
     return updated
 
 
-def optimize_weights(n_iter=800):
-    history = load_history(1000)
-    samples = []
-    result_map = {"主胜": 0, "平局": 1, "客胜": 2}
-    for h in history:
-        if not h.get("actual_result"): continue
-        try:
-            coefs = json.loads(h.get("coefs_json") or "{}")
-            ho, do, ao = float(h["home_odds"]), float(h["draw_odds"]), float(h["away_odds"])
-            y = result_map[h["actual_result"]]
-            league = h.get("league") or "普通"
-            mw = MARKET_FUSION_MAP.get(league, 0.55)
-            samples.append({"coefs": coefs, "odds": (ho, do, ao), "y": y, "mw": mw})
-        except Exception:
-            continue
-    if len(samples) < 30:
+def parse_injury_positions(injuries_json):
+    try:
+        inj_list = json.loads(injuries_json)
+    except Exception:
         return None
+    h = {"GK": 0, "DEF": 0, "MID": 0, "ATT": 0}
+    a = {"GK": 0, "DEF": 0, "MID": 0, "ATT": 0}
+    for inj in inj_list:
+        pos_cn = (inj.get("位置", "") or "").strip()
+        raw = (inj.get("raw_position", "") or "").strip()
+        is_home = inj.get("球队") == "主队"
+        if pos_cn == "门将" or raw == "Goalkeeper": key = "GK"
+        elif pos_cn == "后卫" or raw == "Defender": key = "DEF"
+        elif pos_cn == "中场" or raw == "Midfielder": key = "MID"
+        elif pos_cn == "前锋" or raw == "Attacker": key = "ATT"
+        else: continue
+        if is_home: h[key] += 1
+        else: a[key] += 1
+    return h, a
 
-    def evaluate(w):
-        total = 0.0
-        for s in samples:
-            coefs = s["coefs"]
-            market_p = np.array(devig(list(s["odds"])))
-            base_adjust = sum(coefs.get(k, 0) * w.get(k, 0) for k in
-                              ["injury", "home_away", "h2h", "form", "motivation"])
-            ext_adjust = (coefs.get("schedule", 0) * w.get("schedule", 0.5) +
-                          coefs.get("travel", 0) * w.get("travel", 0.3) +
-                          coefs.get("eu_pressure", 0) * w.get("eu_pressure", 0.5))
-            adjust = base_adjust + ext_adjust * 0.3
-            model_p = softmax3(market_p, adjust * 0.7)
-            model_p = model_p * np.array([1 + adjust * 0.15, 1 - adjust * 0.05, 1 - adjust * 0.1])
-            model_p = model_p / model_p.sum()
-            mw = s["mw"]
-            final_p = mw * model_p + (1 - mw) * market_p
-            final_p = final_p / final_p.sum()
-            total += -np.log(max(final_p[s["y"]], 1e-6))
-        return total / len(samples)
-
-    current_w = {"injury": 0.20, "home_away": 0.20, "h2h": 0.18, "form": 0.21, "motivation": 0.21,
-                 "schedule": 0.5, "travel": 0.3, "eu_pressure": 0.5}
-    current_loss = evaluate(current_w)
-    best_w = current_w.copy()
-    best_loss = current_loss
-    rng = np.random.default_rng(42)
-    for _ in range(n_iter):
-        d = rng.dirichlet([1, 1, 1, 1, 1])
-        cand = {"injury": round(float(d[0]), 2), "home_away": round(float(d[1]), 2),
-            "h2h": round(float(d[2]), 2), "form": round(float(d[3]), 2),
-            "motivation": round(float(d[4]), 2),
-            "schedule": round(float(rng.uniform(0.2, 1.0)), 2),
-            "travel": round(float(rng.uniform(0.1, 0.8)), 2),
-            "eu_pressure": round(float(rng.uniform(0.2, 1.0)), 2)}
-        loss = evaluate(cand)
-        if loss < best_loss:
-            best_loss = loss
-            best_w = cand
-    return current_w, current_loss, best_w, best_loss, len(samples)
 
 def build_optimization_matrix():
-    """构建优化矩阵。特征12个：5核心系数 + 3扩展系数 + 4位置缺阵差"""
     history = load_history(1000)
     X_rows, y_rows, details = [], [], []
     result_map = {"主胜": 0, "平局": 1, "客胜": 2}
@@ -292,7 +252,6 @@ def build_optimization_matrix():
 
 
 def optimize_all_with_ml(n_search=400):
-    """LR + XGBoost 联合优化所有系数"""
     built = build_optimization_matrix()
     if built is None:
         return None
@@ -416,7 +375,6 @@ def optimize_all_with_ml(n_search=400):
             "initial_loss": initial_loss, "best_loss": best_loss,
             "best_alpha": best_alpha, "best_alpha_loss": best_alpha_loss,
             "n_samples": n_samples}
-
 
 
 def calc_calibration():
@@ -1155,7 +1113,7 @@ def analyze_match(home_name, away_name, date_hint=None, fixture_id=None):
     try: standings = get_standings_safe(lid)
     except Exception: standings = []
 
-        pos_w = st.session_state.get("params", {}).get("default", {}).get("injury_position_weights", None)
+    pos_w = st.session_state.get("params", {}).get("default", {}).get("injury_position_weights", None)
     inj_coef, _, _ = calc_injury_coef(injuries, hid, aid, pos_w=pos_w)
     h2h_coef = calc_h2h_coef(h2h, hid)
     form_coef = calc_form_diff(hr, ar, hid, aid)
@@ -1546,7 +1504,7 @@ with tab2:
         if br["total"] == 0: st.success("🎉 全部补抓完成")
         else: st.info("继续点【开始补抓】处理下一批")
 
-         st.markdown("---")
+    st.markdown("---")
     st.subheader("🔬 一键联合优化（LR + XGBoost）")
     st.caption("一次点击优化：5项核心系数 + 3项扩展系数 + 4项位置伤停系数 + 市场融合α（约10-20秒）")
 
